@@ -25,6 +25,7 @@ public sealed class PhysicsSystem : ISystem
         world.ForEach<Velocity, RigidBody>((Entity _, ref Velocity v, ref RigidBody rb) =>
         {
             if (rb.Mass <= 0f) return;
+            if (rb.Asleep) return;   // resting body — skip integration until woken
 
             // Accumulate gravity as a force.
             rb.AccumulatedForce += Gravity * rb.Mass;
@@ -56,6 +57,7 @@ public sealed class PhysicsSystem : ISystem
     {
         if (!world.HasComponent<RigidBody>(entity)) return;
         ref var rb = ref world.GetComponent<RigidBody>(entity);
+        rb.Asleep = false; rb.SleepTimer = 0f;   // applying force wakes the body
         rb.AccumulatedForce += force;
     }
 
@@ -68,6 +70,7 @@ public sealed class PhysicsSystem : ISystem
     {
         if (!world.HasComponent<RigidBody>(entity)) return;
         ref var rb = ref world.GetComponent<RigidBody>(entity);
+        rb.Asleep = false; rb.SleepTimer = 0f;   // applying force wakes the body
         rb.AccumulatedForce  += force;
         // 2-D cross product: torque = r × F = rx*Fy − ry*Fx
         rb.AccumulatedTorque += contactOffset.X * force.Y - contactOffset.Y * force.X;

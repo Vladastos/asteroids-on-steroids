@@ -7,28 +7,41 @@ using AsteroidsEngine.Engine.Events;
 namespace AsteroidsEngine.Engine.Systems;
 
 /// <summary>
-/// Detects collisions between entities with Transform + Collider components.
+/// Detects and resolves collisions between entities with Transform + Collider.
 ///
 /// Each frame:
-///   1. Rebuild spatial index (insert all collidable entity AABBs)
-///   2. For each entity, query candidates from the index
-///   3. Run narrow-phase (shape.Intersects) on each candidate pair
-///   4. Publish CollisionEvent (deferred) for each confirmed contact
-///   5. Optionally resolve overlap (separate overlapping rigid bodies)
+///   1. Rebuild the spatial index.
+///   2. Narrow phase per candidate pair → separate overlap, publish CollisionEvent,
+///      and gather a contact for every pair where both bodies are dynamic.
+///   3. Iterative velocity solve (sequential impulses: normal + Coulomb friction).
+///      Iterating lets coupled/stacked contacts converge instead of jittering.
+///   4. Sleeping: bodies at rest below the velocity thresholds deactivate and are
+///      skipped by integration + the solver until a contact or force wakes them.
 ///
-/// A pair (A, B) is tested only if (A.Mask & B.Layer) != 0.
-/// Each pair is tested at most once per frame.
+/// A pair (A, B) is tested only if (A.Mask & B.Layer) != 0. Each pair once per frame.
 /// </summary>
 public sealed class CollisionSystem : ISystem
 {
     private readonly ISpatialIndex _spatial;
     private readonly EventBus      _bus;
 
-    // Reused per-frame buffers to avoid allocations.
     private readonly List<Entity>        _candidates  = new();
     private readonly HashSet<(int, int)> _testedPairs = new();
+    private readonly List<Contact>       _contacts    = new();
 
     public bool ResolveOverlap { get; set; } = true;
+
+    /// <summary>Sequential-impulse velocity iterations. More = stabler stacks.</summary>
+    public int Iterations { get; set; } = 6;
+
+    /// <summary>Enable body sleeping (deactivation of resting bodies).</summary>
+    public bool EnableSleeping { get; set; } = true;
+
+    // Sleep thresholds.
+    private const float LinSleepTol   = 6f;     // px/s
+    private const float AngSleepTol   = 0.12f;  // rad/s
+    private const float SleepTime     = 0.5f;   // s below tolerance before sleeping
+    private const float RestitutionVelThreshold = 30f; // below this approach speed, no bounce
 
     public CollisionSystem(ISpatialIndex spatial, EventBus bus)
     {
@@ -40,6 +53,7 @@ public sealed class CollisionSystem : ISystem
     {
         _spatial.Clear();
         _testedPairs.Clear();
+        _contacts.Clear();
 
         // --- Phase 1: populate spatial index ---
         world.ForEach<Transform, Collider>((Entity e, ref Transform t, ref Collider c) =>
@@ -49,7 +63,7 @@ public sealed class CollisionSystem : ISystem
             _spatial.Insert(e, min, max);
         });
 
-        // --- Phase 2 & 3: query + narrow phase ---
+        // --- Phase 2 & 3: narrow phase → separate, publish, gather contacts ---
         world.ForEach<Transform, Collider>((Entity entityA, ref Transform tA, ref Collider cA) =>
         {
             if (world.HasComponent<DisabledTag>(entityA)) return;
@@ -62,7 +76,6 @@ public sealed class CollisionSystem : ISystem
             {
                 if (entityB == entityA) continue;
 
-                // Canonical pair ordering: lower ID first — prevents A-B and B-A both being tested.
                 int idA = entityA.Id, idB = entityB.Id;
                 var pair = idA < idB ? (idA, idB) : (idB, idA);
                 if (!_testedPairs.Add(pair)) continue;
@@ -70,43 +83,51 @@ public sealed class CollisionSystem : ISystem
                 if (!world.IsAlive(entityB)) continue;
                 ref var cB = ref world.GetComponent<Collider>(entityB);
 
-                // Layer / mask filter.
                 if ((cA.Mask & cB.Layer) == 0 && (cB.Mask & cA.Layer) == 0) continue;
 
                 ref var tB = ref world.GetComponent<Transform>(entityB);
 
                 var contact = cA.Shape.Intersects(tA.Position, tA.Rotation,
-                                                   cB.Shape,
-                                                   tB.Position, tB.Rotation);
+                                                   cB.Shape, tB.Position, tB.Rotation);
                 if (contact == null) continue;
 
-                // Resolve overlap (push apart) if both have RigidBodies.
                 if (ResolveOverlap)
                 {
-                    TrySeparate    (world, entityA, ref tA, entityB, ref tB, contact.Value);
-                    TryApplyImpulse(world, entityA, entityB, contact.Value);
+                    TrySeparate  (world, entityA, ref tA, entityB, ref tB, contact.Value);
+                    GatherContact(world, entityA, entityB, contact.Value);
                 }
 
                 _bus.Publish(new CollisionEvent(entityA, entityB, contact.Value));
             }
         });
+
+        // --- Phase 4: iterative velocity solve ---
+        for (int it = 0; it < Iterations; it++)
+            for (int i = 0; i < _contacts.Count; i++)
+            {
+                var c = _contacts[i];
+                SolveContact(world, ref c);
+                _contacts[i] = c;
+            }
+
+        // --- Phase 5: sleeping ---
+        if (EnableSleeping) UpdateSleep(world, (float)dt);
     }
 
     /// <summary>
-    /// Pushes overlapping entities apart along the contact normal,
-    /// weighted by their masses. Skipped if either entity has no RigidBody.
+    /// Pushes overlapping entities apart along the contact normal, weighted by mass.
+    /// Skipped if either entity has no RigidBody. (Positional correction; the
+    /// velocity solver handles the bounce/friction response.)
     /// </summary>
     private static void TrySeparate(World world,
                                      Entity eA, ref Transform tA,
                                      Entity eB, ref Transform tB,
                                      ContactInfo contact)
     {
-        bool hasA = world.HasComponent<RigidBody>(eA);
-        bool hasB = world.HasComponent<RigidBody>(eB);
-        if (!hasA || !hasB) return;
+        if (!world.HasComponent<RigidBody>(eA) || !world.HasComponent<RigidBody>(eB)) return;
 
-        float massA = world.GetComponent<RigidBody>(eA).Mass;
-        float massB = world.GetComponent<RigidBody>(eB).Mass;
+        float massA  = world.GetComponent<RigidBody>(eA).Mass;
+        float massB  = world.GetComponent<RigidBody>(eB).Mass;
         float total  = massA + massB;
         float shareA = total > 0f ? massB / total : 0.5f;
 
@@ -116,57 +137,133 @@ public sealed class CollisionSystem : ISystem
     }
 
     /// <summary>
-    /// Applies a velocity impulse to resolve the collision, including both linear
-    /// and angular components (full 2D rigid-body formula).
-    ///
-    /// j = −(1 + e) × v_rel_n
-    ///     ────────────────────────────────────────────────
-    ///     1/mA + 1/mB + (rA×n)²/IA + (rB×n)²/IB
-    ///
-    /// Skipped if either entity has no RigidBody. Uses min(eA.Restitution, eB.Restitution).
+    /// Builds a Contact (precomputing effective masses + restitution bias) for a
+    /// dynamic pair and wakes both bodies. Skipped if either lacks RigidBody/Velocity.
     /// </summary>
-    private static void TryApplyImpulse(World world, Entity eA, Entity eB, ContactInfo contact)
+    private void GatherContact(World world, Entity a, Entity b, ContactInfo info)
     {
-        if (!world.HasComponent<RigidBody>(eA) || !world.HasComponent<RigidBody>(eB)) return;
-        if (!world.HasComponent<Velocity>(eA)  || !world.HasComponent<Velocity>(eB))  return;
+        if (!world.HasComponent<RigidBody>(a) || !world.HasComponent<RigidBody>(b)) return;
+        if (!world.HasComponent<Velocity>(a)  || !world.HasComponent<Velocity>(b))  return;
 
-        ref var rbA = ref world.GetComponent<RigidBody>(eA);
-        ref var rbB = ref world.GetComponent<RigidBody>(eB);
-        ref var vA  = ref world.GetComponent<Velocity>(eA);
-        ref var vB  = ref world.GetComponent<Velocity>(eB);
-        ref var tA  = ref world.GetComponent<Transform>(eA);
-        ref var tB  = ref world.GetComponent<Transform>(eB);
+        ref var rbA = ref world.GetComponent<RigidBody>(a);
+        ref var rbB = ref world.GetComponent<RigidBody>(b);
+        ref var vA  = ref world.GetComponent<Velocity>(a);
+        ref var vB  = ref world.GetComponent<Velocity>(b);
+        ref var tA  = ref world.GetComponent<Transform>(a);
+        ref var tB  = ref world.GetComponent<Transform>(b);
 
-        Vector2 n  = contact.Normal;
-        Vector2 rA = contact.ContactPoint - tA.Position;
-        Vector2 rB = contact.ContactPoint - tB.Position;
+        // Contact wakes both bodies.
+        rbA.Asleep = false; rbA.SleepTimer = 0f;
+        rbB.Asleep = false; rbB.SleepTimer = 0f;
 
-        // Velocity at the contact point, including rotation (ω × r in 2D = (-ω·r.Y, ω·r.X)).
-        Vector2 vContactA = vA.Linear + new Vector2(-vA.Angular * rA.Y,  vA.Angular * rA.X);
-        Vector2 vContactB = vB.Linear + new Vector2(-vB.Angular * rB.Y,  vB.Angular * rB.X);
-        float   vRelN     = Vector2.Dot(vContactA - vContactB, n);
+        Vector2 n       = info.Normal;          // points B → A
+        Vector2 tangent = new(-n.Y, n.X);
+        Vector2 rA      = info.ContactPoint - tA.Position;
+        Vector2 rB      = info.ContactPoint - tB.Position;
 
-        // Already separating — no impulse needed.
-        if (vRelN >= 0f) return;
+        float invMassA = rbA.Mass    > 0f ? 1f / rbA.Mass    : 0f;
+        float invMassB = rbB.Mass    > 0f ? 1f / rbB.Mass    : 0f;
+        float invIA    = rbA.Inertia > 0f ? 1f / rbA.Inertia : 0f;
+        float invIB    = rbB.Inertia > 0f ? 1f / rbB.Inertia : 0f;
 
-        float e = MathF.Min(rbA.Restitution, rbB.Restitution);
+        float rnA = Cross(rA, n),       rnB = Cross(rB, n);
+        float kn  = invMassA + invMassB + invIA * rnA * rnA + invIB * rnB * rnB;
+        float rtA = Cross(rA, tangent), rtB = Cross(rB, tangent);
+        float kt  = invMassA + invMassB + invIA * rtA * rtA + invIB * rtB * rtB;
 
-        // 2D cross product r × n (scalar).
-        float rAn = rA.X * n.Y - rA.Y * n.X;
-        float rBn = rB.X * n.Y - rB.Y * n.X;
+        // Restitution bias from the initial approach velocity at the contact.
+        Vector2 vRel = VelAt(vA, rA) - VelAt(vB, rB);
+        float   vn0  = Vector2.Dot(vRel, n);
+        float   e    = MathF.Min(rbA.Restitution, rbB.Restitution);
+        float   bias = vn0 < -RestitutionVelThreshold ? -e * vn0 : 0f;
 
-        float denom = 1f / rbA.Mass + 1f / rbB.Mass;
-        if (rbA.Inertia > 0f) denom += rAn * rAn / rbA.Inertia;
-        if (rbB.Inertia > 0f) denom += rBn * rBn / rbB.Inertia;
-        if (denom <= 0f) return;
+        _contacts.Add(new Contact
+        {
+            A = a, B = b,
+            Normal = n, Tangent = tangent, rA = rA, rB = rB,
+            InvMassA = invMassA, InvMassB = invMassB, InvIA = invIA, InvIB = invIB,
+            NormalMass  = kn > 0f ? 1f / kn : 0f,
+            TangentMass = kt > 0f ? 1f / kt : 0f,
+            VelocityBias = bias,
+            Friction = MathF.Sqrt(MathF.Max(0f, rbA.Friction) * MathF.Max(0f, rbB.Friction)),
+            AccumN = 0f, AccumT = 0f,
+        });
+    }
 
-        float j = -(1f + e) * vRelN / denom;
+    /// <summary>One sequential-impulse pass for a contact: normal impulse (clamped
+    /// ≥ 0) then Coulomb friction (clamped to ±μ·normalImpulse).</summary>
+    private static void SolveContact(World world, ref Contact c)
+    {
+        ref var vA = ref world.GetComponent<Velocity>(c.A);
+        ref var vB = ref world.GetComponent<Velocity>(c.B);
 
-        Vector2 impulse = j * n;
-        vA.Linear  +=  impulse / rbA.Mass;
-        vB.Linear  -=  impulse / rbB.Mass;
+        // --- Normal ---
+        Vector2 vRel = VelAt(vA, c.rA) - VelAt(vB, c.rB);
+        float   vn   = Vector2.Dot(vRel, c.Normal);
+        float   dPn  = c.NormalMass * (c.VelocityBias - vn);
 
-        if (rbA.Inertia > 0f) vA.Angular += (rA.X * impulse.Y - rA.Y * impulse.X) / rbA.Inertia;
-        if (rbB.Inertia > 0f) vB.Angular -= (rB.X * impulse.Y - rB.Y * impulse.X) / rbB.Inertia;
+        float newN = MathF.Max(c.AccumN + dPn, 0f);
+        dPn = newN - c.AccumN;
+        c.AccumN = newN;
+
+        Vector2 p = dPn * c.Normal;
+        vA.Linear  += c.InvMassA * p; vA.Angular += c.InvIA * Cross(c.rA, p);
+        vB.Linear  -= c.InvMassB * p; vB.Angular -= c.InvIB * Cross(c.rB, p);
+
+        // --- Friction ---
+        vRel = VelAt(vA, c.rA) - VelAt(vB, c.rB);
+        float vt  = Vector2.Dot(vRel, c.Tangent);
+        float dPt = c.TangentMass * (-vt);
+
+        float maxF = c.Friction * c.AccumN;
+        float newT = Math.Clamp(c.AccumT + dPt, -maxF, maxF);
+        dPt = newT - c.AccumT;
+        c.AccumT = newT;
+
+        Vector2 pt = dPt * c.Tangent;
+        vA.Linear  += c.InvMassA * pt; vA.Angular += c.InvIA * Cross(c.rA, pt);
+        vB.Linear  -= c.InvMassB * pt; vB.Angular -= c.InvIB * Cross(c.rB, pt);
+    }
+
+    /// <summary>Deactivates bodies that have stayed below the velocity thresholds
+    /// for SleepTime, zeroing their velocity. Woken by contacts/forces elsewhere.</summary>
+    private static void UpdateSleep(World world, float dt)
+    {
+        const float linTol2 = LinSleepTol * LinSleepTol;
+        world.ForEach<Velocity, RigidBody>((Entity _, ref Velocity v, ref RigidBody rb) =>
+        {
+            if (rb.Mass <= 0f || rb.Asleep) return;
+
+            if (v.Linear.LengthSquared() < linTol2 && MathF.Abs(v.Angular) < AngSleepTol)
+            {
+                rb.SleepTimer += dt;
+                if (rb.SleepTimer >= SleepTime)
+                {
+                    rb.Asleep  = true;
+                    v.Linear   = Vector2.Zero;
+                    v.Angular  = 0f;
+                }
+            }
+            else
+            {
+                rb.SleepTimer = 0f;
+            }
+        });
+    }
+
+    // Velocity of a body at a point offset r from its centre (includes rotation).
+    private static Vector2 VelAt(in Velocity v, Vector2 r) =>
+        v.Linear + new Vector2(-v.Angular * r.Y, v.Angular * r.X);
+
+    // 2-D scalar cross product.
+    private static float Cross(Vector2 a, Vector2 b) => a.X * b.Y - a.Y * b.X;
+
+    private struct Contact
+    {
+        public Entity  A, B;
+        public Vector2 Normal, Tangent, rA, rB;
+        public float   InvMassA, InvMassB, InvIA, InvIB;
+        public float   NormalMass, TangentMass, VelocityBias, Friction;
+        public float   AccumN, AccumT;   // accumulated impulses (for clamping)
     }
 }

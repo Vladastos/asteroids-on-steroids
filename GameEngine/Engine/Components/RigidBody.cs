@@ -21,4 +21,22 @@ public struct RigidBody
     /// Default 0 (no bounce) — set explicitly at entity spawn.
     /// </summary>
     public float Restitution;
+
+    /// <summary>
+    /// Coulomb friction coefficient. Combined per contact as sqrt(fA·fB), so 0 on
+    /// either body means a frictionless contact. Default 0.
+    /// </summary>
+    public float Friction;
+
+    // --- Sleeping (managed by CollisionSystem) ---
+
+    /// <summary>Seconds spent below the sleep velocity thresholds. Internal.</summary>
+    public float SleepTimer;
+
+    /// <summary>
+    /// When true the body is at rest: skipped by force integration and the velocity
+    /// solver until a contact or an applied force wakes it. Saves work in scenes
+    /// full of settled debris.
+    /// </summary>
+    public bool Asleep;
 }
