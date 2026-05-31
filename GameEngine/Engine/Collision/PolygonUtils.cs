@@ -3,44 +3,9 @@ using System.Numerics;
 namespace AsteroidsEngine.Engine.Collision;
 
 /// <summary>
-/// Result of a Split() call. All polygon arrays are convex by the SH invariant.
-/// Callers assign PolygonShape directly — no further decomposition needed.
-/// </summary>
-public readonly struct SplitResult
-{
-    /// <summary>
-    /// Far polygon from the primary perpendicular cut. The largest surviving chunk.
-    /// Null if the entire polygon fell inside the fracture zone.
-    /// </summary>
-    public readonly Vector2[]? PrimaryFarPiece;
-
-    /// <summary>
-    /// Far polygons from the K-1 secondary radial cuts (the "petal" pieces).
-    /// Together with PrimaryFarPiece these form the surviving compound asteroid.
-    /// </summary>
-    public readonly Vector2[][] SecondaryFarPieces;
-
-    /// <summary>Impact-zone pieces with area ≥ minAreaThreshold AND centroid > blastRadius.</summary>
-    public readonly Vector2[][] SurvivingFragments;
-
-    /// <summary>Impact-zone pieces with area &lt; minAreaThreshold OR centroid ≤ blastRadius → fading particles.</summary>
-    public readonly Vector2[][] DebrisFragments;
-
-    public SplitResult(Vector2[]?  primaryFarPiece,
-                       Vector2[][] secondaryFarPieces,
-                       Vector2[][] survivingFragments,
-                       Vector2[][] debrisFragments)
-    {
-        PrimaryFarPiece    = primaryFarPiece;
-        SecondaryFarPieces = secondaryFarPieces;
-        SurvivingFragments = survivingFragments;
-        DebrisFragments    = debrisFragments;
-    }
-}
-
-/// <summary>
-/// Pure-geometry utilities for convex polygon generation, clipping, splitting,
-/// and physical property computation. No ECS, no rendering dependencies.
+/// Pure-geometry utilities for convex polygon generation, clipping, and physical
+/// property computation. Consumed by the destruction module (tessellation, fragment
+/// physics). No ECS, no rendering dependencies.
 ///
 /// Coordinate convention: matches the engine's Y-down screen space.
 /// Winding order produced by GenerateConvex: clockwise (matches PolygonShape).
@@ -203,164 +168,6 @@ public static class PolygonUtils
     }
 
     // -------------------------------------------------------------------------
-    // Two-phase polygon splitting
-    // -------------------------------------------------------------------------
-
-    /// <summary>
-    /// Splits a convex polygon into fragments using a three-phase algorithm.
-    ///
-    /// Phase 1 — Primary cut: one plane perpendicular to the centroid→impact direction,
-    /// at <paramref name="fractureZoneDepth"/> from the impact point. Produces
-    /// PrimaryFarPiece (surviving chunk) + fracture zone (near side).
-    ///
-    /// Phase 2 — Radial secondary cuts: <paramref name="secondaryCuts"/> planes are
-    /// applied sequentially to the fracture zone. Each is perpendicular to a ray
-    /// from the impact point, fanned across a cone of half-angle
-    /// <paramref name="coneHalfAngle"/> facing the centroid. Each cut's far side
-    /// becomes a SecondaryFarPiece (also attached to the surviving compound).
-    /// Together the far pieces form a concave "bite" at the impact site.
-    ///
-    /// Phase 3 — Impact zone fragmentation: the remaining inner polygon is cut by
-    /// <paramref name="innerCuts"/> planes. Fragments within
-    /// <paramref name="blastRadius"/> of the impact point go to DebrisFragments.
-    ///
-    /// All output polygons are convex (SH invariant). Spawn blast particles at
-    /// the impact point directly — no geometry extraction needed.
-    /// </summary>
-    public static SplitResult Split(
-        IReadOnlyList<Vector2> polygon,
-        Vector2 impactPoint,
-        Vector2 impactDir,
-        float[] faultAngles,
-        int  secondaryCuts,
-        int  innerCuts,
-        float fractureZoneDepth,
-        float fractureRadius,
-        float coneHalfAngle,
-        float blastRadius,
-        float spreadAngle,
-        float spinFaultAngle,
-        Random rng,
-        float minAreaThreshold = 180f)
-    {
-        secondaryCuts = Math.Clamp(secondaryCuts, 0, 8);
-        innerCuts     = Math.Clamp(innerCuts,     1, 10);
-
-        // ── Phase 1: primary perpendicular cut ───────────────────────────────
-        Vector2 centroid = ComputeCentroid(polygon);
-        Vector2 toImpact = impactPoint - centroid;
-        Vector2 cutDir   = toImpact.LengthSquared() > 1e-4f
-                           ? Vector2.Normalize(toImpact)
-                           : impactDir;
-
-        Vector2 primaryCutPoint = impactPoint - cutDir * fractureZoneDepth;
-        var primaryFarPiece = ClipConvexByHalfPlane(polygon, primaryCutPoint, -cutDir);
-        List<Vector2> zone  = ClipConvexByHalfPlane(polygon, primaryCutPoint,  cutDir);
-
-        // ── Phase 2: secondary radial cuts (the "bite") ──────────────────────
-        // innerDir: from impact toward centroid — the centre of the cut fan.
-        Vector2 innerDir  = -cutDir;
-        float   impactAngle = MathF.Atan2(innerDir.Y, innerDir.X);
-        float   step        = secondaryCuts > 1
-                              ? 2f * coneHalfAngle / (secondaryCuts - 1)
-                              : 0f;
-
-        var secondaryFarPieces = new List<Vector2[]>(secondaryCuts);
-
-        for (int k = 0; k < secondaryCuts && zone.Count >= 3; k++)
-        {
-            float   angle = impactAngle + (k - (secondaryCuts - 1) * 0.5f) * step;
-            Vector2 ray   = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
-            Vector2 pt    = impactPoint + ray * fractureRadius;
-
-            // far side of cut (away from impact along ray) → surviving compound
-            var petal = ClipConvexByHalfPlane(zone, pt,  ray);
-            zone      = ClipConvexByHalfPlane(zone, pt, -ray);
-
-            if (petal.Count >= 3 && MathF.Abs(ComputeArea(petal)) >= minAreaThreshold * 0.5f)
-                secondaryFarPieces.Add(petal.ToArray());
-        }
-
-        // ── Phase 3: impact zone fragmentation ───────────────────────────────
-        var surviving = new List<Vector2[]>();
-        var debris    = new List<Vector2[]>();
-
-        if (zone.Count >= 3)
-            ProcessImpactZone(zone, impactPoint, blastRadius, faultAngles, innerCuts,
-                              spreadAngle, spinFaultAngle, minAreaThreshold, rng,
-                              surviving, debris);
-
-        Vector2[]? primaryFar = primaryFarPiece.Count >= 3 ? primaryFarPiece.ToArray() : null;
-        return new SplitResult(primaryFar, secondaryFarPieces.ToArray(),
-                               surviving.ToArray(), debris.ToArray());
-    }
-
-    /// <summary>
-    /// Applies inner cuts to the impact zone and classifies each resulting fragment:
-    ///   • centroid within blastRadius of impactPoint → DebrisFragments (blast particles)
-    ///   • area &lt; minAreaThreshold → DebrisFragments (dust)
-    ///   • otherwise → SurvivingFragments
-    /// Cut planes all pass through impactPoint at angles chosen by SelectCutAngles.
-    /// </summary>
-    private static void ProcessImpactZone(
-        IReadOnlyList<Vector2> zone,
-        Vector2 impactPoint,
-        float blastRadius,
-        float[] faultAngles,
-        int innerCuts,
-        float spreadAngle,
-        float spinFaultAngle,
-        float minAreaThreshold,
-        Random rng,
-        List<Vector2[]> surviving,
-        List<Vector2[]> debris)
-    {
-        if (zone.Count < 3) return;
-
-        float[] cutAngles = SelectCutAngles(zone, impactPoint, faultAngles,
-                                            innerCuts, spreadAngle, spinFaultAngle, rng);
-
-        var fragments = new List<List<Vector2>> { new List<Vector2>(zone) };
-
-        foreach (float angle in cutAngles)
-        {
-            var dir    = new Vector2(MathF.Cos(angle), MathF.Sin(angle));
-            var normal = new Vector2(-dir.Y, dir.X);
-            var next   = new List<List<Vector2>>(fragments.Count * 2);
-
-            foreach (var frag in fragments)
-            {
-                var a = ClipConvexByHalfPlane(frag, impactPoint,  normal);
-                var b = ClipConvexByHalfPlane(frag, impactPoint, -normal);
-                if (a.Count >= 3) next.Add(a);
-                if (b.Count >= 3) next.Add(b);
-            }
-            fragments = next;
-        }
-
-        float blastR2 = blastRadius * blastRadius;
-
-        foreach (var frag in fragments)
-        {
-            if (frag.Count < 3) continue;
-
-            // Blast zone filter: centroid within blastRadius → particle
-            Vector2 fragCentroid = ComputeCentroid(frag);
-            if (blastR2 > 0f && (fragCentroid - impactPoint).LengthSquared() <= blastR2)
-            {
-                debris.Add(frag.ToArray());
-                continue;
-            }
-
-            float area = MathF.Abs(ComputeArea(frag));
-            if (area >= minAreaThreshold)
-                surviving.Add(frag.ToArray());
-            else
-                debris.Add(frag.ToArray());
-        }
-    }
-
-    // -------------------------------------------------------------------------
     // Geometric properties
     // -------------------------------------------------------------------------
 
@@ -436,7 +243,7 @@ public static class PolygonUtils
     /// <summary>
     /// Re-centres world-space vertices around their area centroid.
     /// Returns (centroid, centroid-relative local vertices).
-    /// Call after every Split() to maintain Transform.Position == world centroid.
+    /// Call after re-centring fragment geometry to maintain Transform.Position == world centroid.
     /// </summary>
     public static (Vector2 centroid, Vector2[] localVertices) RecenterVertices(
         IReadOnlyList<Vector2> worldVertices)
@@ -478,77 +285,4 @@ public static class PolygonUtils
         return best;
     }
 
-    // -------------------------------------------------------------------------
-    // Internal helpers
-    // -------------------------------------------------------------------------
-
-    /// <summary>
-    /// Distributes count cut angles evenly within spreadAngle, centred on the
-    /// direction perpendicular to (impactPoint − shardCentroid), then snaps each
-    /// slot to the nearest fault angle or spin-induced fault within half a slot width.
-    /// </summary>
-    private static float[] SelectCutAngles(
-        IReadOnlyList<Vector2> shard,
-        Vector2 impactPoint,
-        float[] faultAngles,
-        int count,
-        float spreadAngle,
-        float spinFaultAngle,
-        Random rng)
-    {
-        Vector2 centroid  = ComputeCentroid(shard);
-        Vector2 toImpact  = impactPoint - centroid;
-        float baseAngle = toImpact.LengthSquared() > 1e-6f
-            ? MathF.Atan2(toImpact.Y, toImpact.X) + MathF.PI / 2f
-            : (float)(rng.NextDouble() * 2 * MathF.PI);
-
-        float slotWidth = count > 1 ? spreadAngle / count : spreadAngle;
-        float halfSlot  = slotWidth * 0.5f;
-        var result = new float[count];
-
-        for (int i = 0; i < count; i++)
-        {
-            float slotCenter = baseAngle + (i - (count - 1) * 0.5f) * slotWidth;
-
-            float best     = slotCenter;
-            float bestDist = halfSlot + 1f;
-
-            // Snap to nearest fault angle within the slot (treat as undirected line).
-            foreach (float fa in faultAngles)
-            {
-                float d = MathF.Min(AngleDiff(fa, slotCenter),
-                                    AngleDiff(fa + MathF.PI, slotCenter));
-                if (d < bestDist && d < halfSlot)
-                {
-                    bestDist = d;
-                    best = AngleDiff(fa, slotCenter) <= AngleDiff(fa + MathF.PI, slotCenter)
-                           ? fa : fa + MathF.PI;
-                }
-            }
-
-            // Also snap to spin-induced fault if closer.
-            if (!float.IsNaN(spinFaultAngle))
-            {
-                float d = MathF.Min(AngleDiff(spinFaultAngle, slotCenter),
-                                    AngleDiff(spinFaultAngle + MathF.PI, slotCenter));
-                if (d < bestDist && d < halfSlot)
-                {
-                    bestDist = d;
-                    best = AngleDiff(spinFaultAngle, slotCenter)
-                           <= AngleDiff(spinFaultAngle + MathF.PI, slotCenter)
-                           ? spinFaultAngle : spinFaultAngle + MathF.PI;
-                }
-            }
-
-            result[i] = best + (float)(rng.NextDouble() - 0.5) * 0.25f;
-        }
-
-        return result;
-    }
-
-    private static float AngleDiff(float a, float b)
-    {
-        float d = MathF.Abs(a - b) % (2 * MathF.PI);
-        return d > MathF.PI ? 2 * MathF.PI - d : d;
-    }
 }

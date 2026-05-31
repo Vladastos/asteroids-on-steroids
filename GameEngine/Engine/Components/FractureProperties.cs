@@ -1,53 +1,56 @@
 namespace AsteroidsEngine.Engine.Components;
 
 /// <summary>
-/// Immutable material description for fracturable entities.
-/// Use the static presets or construct custom values; share freely across entities.
-/// Runtime mutable state lives in FractureState.
+/// Immutable material description for a fracturable (cell/bond) body. Shareable
+/// across entities; runtime mutable state lives in FractureState.
+///
+/// See docs/destruction_engine_spec.md §4.3.
 /// </summary>
 public struct FractureProperties
 {
-    /// <summary>[0 = fully ductile, 1 = fully brittle/glass-like]
-    /// Controls cut count, angular spread of cuts, and blast radius size.
-    /// Ductile: few concentrated cuts near impact; far side survives intact.
-    /// Brittle: many evenly distributed cuts; uniform shattering.
-    /// </summary>
-    public float Brittleness;
-
     /// <summary>
-    /// Minimum impact energy per unit mass to begin fracturing.
-    /// threshold = Toughness × RigidBody.Mass
-    /// Below threshold the hit accumulates in FractureState.AbsorbedEnergy.
+    /// Energy per unit bond length to break a bond (bond.Strength = sharedEdgeLength ×
+    /// Toughness). Higher = harder to fracture. (Abstract units; calibrated against
+    /// the impact energy budget — see spec §9.)
     /// </summary>
     public float Toughness;
 
-    /// <summary>Number of pre-scored fault angles baked into FractureState at spawn.</summary>
-    public int FaultCount;
-
     /// <summary>
-    /// Fragment area (px²) below which a piece is spawned as fading debris
-    /// rather than a live collidable fragment.
+    /// [0 = ductile, 1 = brittle/glass]. Controls how far crack energy propagates
+    /// through the bond graph (brittle = far → shatter; ductile = local chip) and
+    /// the kinetic/surface energy split.
     /// </summary>
+    public float Brittleness;
+
+    /// <summary>Target cell area (px²) at tessellation — the material "grain".
+    /// Constant grain ⇒ larger bodies get proportionally more cells.</summary>
+    public float GrainArea;
+
+    /// <summary>Cell/fragment area (px²) below which a piece becomes visual debris
+    /// rather than a live collidable body.</summary>
     public float MinFragmentArea;
 
-    // ---- Presets ----
-    // Calibrated so standard bullet (KE ≈ 33 600) on reference asteroid (mass ≈ 4)
-    // gives severity ≈ 1 for Rock.
+    /// <summary>Mass per unit area.</summary>
+    public float Density;
+
+    /// <summary>
+    /// Fraction of the available fracture energy converted to fragment kinetic energy
+    /// (the remainder creates fracture surface) at Brittleness = 0. Brittle materials
+    /// put more into surface (more cracks), ductile more into fling.
+    /// </summary>
+    public float KineticFraction;
+
+    // ---- Presets (relative values; calibrate the absolute budget per spec §9) ----
 
     public static readonly FractureProperties Glass = new()
-    {
-        Brittleness = 1.00f, Toughness =    840f, FaultCount = 0, MinFragmentArea =  40f,
-    };
+    { Toughness =  6f, Brittleness = 1.00f, GrainArea =  600f, MinFragmentArea =  40f, Density = 1.0f, KineticFraction = 0.25f };
+
     public static readonly FractureProperties Ice = new()
-    {
-        Brittleness = 0.80f, Toughness =  2_100f, FaultCount = 7, MinFragmentArea =  80f,
-    };
+    { Toughness = 10f, Brittleness = 0.80f, GrainArea =  900f, MinFragmentArea =  80f, Density = 0.9f, KineticFraction = 0.30f };
+
     public static readonly FractureProperties Rock = new()
-    {
-        Brittleness = 0.60f, Toughness =  8_400f, FaultCount = 4, MinFragmentArea = 180f,
-    };
+    { Toughness = 16f, Brittleness = 0.60f, GrainArea = 1500f, MinFragmentArea = 180f, Density = 1.4f, KineticFraction = 0.35f };
+
     public static readonly FractureProperties Metal = new()
-    {
-        Brittleness = 0.15f, Toughness = 84_000f, FaultCount = 2, MinFragmentArea = 400f,
-    };
+    { Toughness = 40f, Brittleness = 0.15f, GrainArea = 3000f, MinFragmentArea = 400f, Density = 2.0f, KineticFraction = 0.45f };
 }
