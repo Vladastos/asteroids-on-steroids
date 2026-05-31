@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net8.0 for cross-platform compilation of engine core.
+         When adding WinForms rendering layer, change to net8.0-windows
+         and add <UseWindowsForms>true</UseWindowsForms>. -->
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>AsteroidsEngine</RootNamespace>
+    <!-- CA1416: "API only supported on Windows" — this project is intentionally
+         Windows-only at runtime. Suppress to keep build output clean. -->
+    <NoWarn>CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Exclude standalone Mono demos — they use mcs + WinForms directly
+         and cannot compile under net8.0 without WinForms target. -->
+    <Compile Remove="Demos/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- System.Drawing.Common gives us Graphics, Bitmap, Pen, etc.
+         on net8.0 for use in engine interfaces before WinForms is wired in. -->
+    <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
+  </ItemGroup>
+
+</Project>
