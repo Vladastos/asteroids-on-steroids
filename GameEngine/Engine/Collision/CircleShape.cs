@@ -48,6 +48,26 @@ public sealed class CircleShape : CollisionShape
         return result?.Flipped();
     }
 
+    public override bool Raycast(Vector2 origin, Vector2 dir, float maxDist,
+                                 Vector2 pos, float rot, out RayCastResult hit)
+    {
+        hit = default;
+        // |origin + t*dir - centre|² = R²  →  t² + 2b t + c = 0  (dir is unit)
+        Vector2 m = origin - pos;
+        float   b = Vector2.Dot(m, dir);
+        float   c = Vector2.Dot(m, m) - Radius * Radius;
+        if (c > 0f && b > 0f) return false;          // origin outside and pointing away
+        float disc = b * b - c;
+        if (disc < 0f) return false;                 // ray misses the circle
+        float t = -b - MathF.Sqrt(disc);
+        if (t < 0f) t = 0f;                          // origin inside → hit at origin
+        if (t > maxDist) return false;
+        Vector2 point  = origin + dir * t;
+        Vector2 normal = Vector2.Normalize(point - pos);
+        hit = new RayCastResult(t, point, normal);
+        return true;
+    }
+
     internal override ContactInfo? IntersectsAABB(Vector2 posA, float rotA,
                                                   AABBShape aabb, Vector2 posB)
     {

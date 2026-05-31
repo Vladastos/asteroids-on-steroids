@@ -97,6 +97,7 @@ class DemoSession
             new PlayerInputSystem(input, player, cfg.Player.Thrust),
             new PhysicsSystem(),
             new MovementSystem(),
+            new RaycastBulletSystem(_bus, Layers.Asteroid),
             new WrapSystem(w, h),
             new ShootSystem(input, player, cfg.Bullet),
             new CollisionSystem(new SpatialGrid(128f), _bus) { ResolveOverlap = true },
@@ -105,6 +106,7 @@ class DemoSession
         ];
 
         _bus.Subscribe<CollisionEvent>(HandleCollision);
+        _bus.Subscribe<BulletHitEvent>(HandleBulletHit);
     }
 
     // -------------------------------------------------------------------------
@@ -165,6 +167,12 @@ class DemoSession
         // using RigidBody.Restitution from each entity. No game-layer response needed here.
     }
 
+    private void HandleBulletHit(BulletHitEvent ev)
+    {
+        if (!_world.IsAlive(ev.Asteroid) || !_world.IsAlive(ev.Bullet)) return;
+        FragmentAsteroid(ev.Asteroid, ev.Bullet, ev.Point);
+    }
+
     private float MassRef => _cfg.Fracture.MassReference;
 
     private void FragmentAsteroid(Entity asteroid, Entity bullet, Vector2 impactPoint)
@@ -181,11 +189,9 @@ class DemoSession
 
         Vector2[] worldVerts = poly.GetWorldVertices(at.Position, at.Rotation);
 
-        // Correct the impact point: the SAT contact point can be inside the polygon
-        // when the bullet moves faster than one asteroid-radius per frame (tunnelling).
-        // The nearest point on the boundary is always on the surface.
-        var bulletAt = _world.GetComponent<Transform>(bullet);
-        impactPoint  = PolygonUtils.NearestPointOnBoundary(worldVerts, bulletAt.Position);
+        // The raycast already gives an exact surface point; snap to the current
+        // polygon boundary in case the asteroid moved between the cast and now.
+        impactPoint = PolygonUtils.NearestPointOnBoundary(worldVerts, impactPoint);
 
         // ── Energy model ─────────────────────────────────────────────────────
         var     bulletVel    = _world.GetComponent<Velocity>(bullet);
@@ -756,17 +762,11 @@ class ShootSystem : ISystem
         Vector2 spawnAt = t.Position + dir * (_bc.Radius * 4f);
 
         Entity b = world.CreateEntity();
-        world.AddComponent(b, new Transform { Position = spawnAt });
+        world.AddComponent(b, new Transform { Position = spawnAt, PreviousPosition = spawnAt });
         world.AddComponent(b, new Velocity { Linear = dir * _bc.Speed });
-        // No RigidBody — bullets fly at constant velocity (MovementSystem only needs Velocity).
-        // Without RigidBody the CollisionSystem cannot apply elastic impulse to bullets,
-        // so they never bounce. Mass comes from config in FragmentAsteroid.
-        world.AddComponent(b, new Collider
-        {
-            Shape = new CircleShape(_bc.Radius),
-            Layer = Layers.Bullet,
-            Mask  = Layers.Asteroid,
-        });
+        // Raycast bullets: no Collider / RigidBody. RaycastBulletSystem sweeps the
+        // segment travelled each fixed step against asteroids — no tunnelling, and an
+        // exact impact point + normal for fracturing.
         world.AddComponent(b, new BulletTag());
         world.AddComponent(b, new TimeToLive { Remaining = _bc.Ttl });
         world.AddComponent(b, new BulletVisual { Color = BulletColor });
@@ -808,6 +808,45 @@ class EventFlushSystem : ISystem
 // =============================================================================
 
 struct BulletVisual { public Color Color; }
+
+// Raycast bullet hit — published by RaycastBulletSystem, handled by DemoSession.
+readonly struct BulletHitEvent
+{
+    public readonly Entity  Asteroid;
+    public readonly Entity  Bullet;
+    public readonly Vector2 Point;
+    public readonly Vector2 Normal;
+    public BulletHitEvent(Entity asteroid, Entity bullet, Vector2 point, Vector2 normal)
+    { Asteroid = asteroid; Bullet = bullet; Point = point; Normal = normal; }
+}
+
+// Sweeps each bullet's travel segment (this fixed step) against asteroids via a
+// raycast — no tunnelling, exact impact point + normal. Runs after MovementSystem
+// and before WrapSystem so the segment is one continuous step (no wrap teleport).
+sealed class RaycastBulletSystem : ISystem
+{
+    private readonly EventBus _bus;
+    private readonly int      _asteroidLayer;
+    private readonly List<(Entity bullet, Vector2 from, Vector2 to)> _segments = new();
+
+    public RaycastBulletSystem(EventBus bus, int asteroidLayer)
+    { _bus = bus; _asteroidLayer = asteroidLayer; }
+
+    public void Update(World world, double dt)
+    {
+        _segments.Clear();
+        world.ForEach<Transform, BulletTag>((Entity e, ref Transform t, ref BulletTag _) =>
+            _segments.Add((e, t.PreviousPosition, t.Position)));
+
+        foreach (var (bullet, from, to) in _segments)
+        {
+            if (!world.IsAlive(bullet)) continue;
+            if ((to - from).LengthSquared() < 1e-4f) continue;   // hasn't moved yet
+            if (PhysicsQueries.Raycast(world, from, to, _asteroidLayer, out var hit))
+                _bus.Publish(new BulletHitEvent(hit.Entity, bullet, hit.Point, hit.Normal));
+        }
+    }
+}
 
 // =============================================================================
 // DemoRenderer — draws everything via the engine's IRenderer (backend-agnostic)

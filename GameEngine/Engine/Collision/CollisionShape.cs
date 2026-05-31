@@ -22,6 +22,19 @@ public abstract class CollisionShape
     /// <summary>Axis-aligned bounding box for broad-phase culling.</summary>
     public abstract (Vector2 min, Vector2 max) GetAABB(Vector2 pos, float rot);
 
+    /// <summary>
+    /// Casts a ray (unit <paramref name="dir"/>, length <paramref name="maxDist"/>)
+    /// from <paramref name="origin"/> against this shape at the given world pose.
+    /// Returns the nearest surface entry hit. Default implementation: no hit —
+    /// concrete shapes override. Used for raycast/shape-cast queries (e.g. bullets).
+    /// </summary>
+    public virtual bool Raycast(Vector2 origin, Vector2 dir, float maxDist,
+                                Vector2 pos, float rot, out RayCastResult hit)
+    {
+        hit = default;
+        return false;
+    }
+
     // ---- Double-dispatch entry points (called by concrete subclasses) ----
     internal abstract ContactInfo? IntersectsCircle (Vector2 posA, float rotA, CircleShape  circle,  Vector2 posB);
     internal abstract ContactInfo? IntersectsPolygon(Vector2 posA, float rotA, PolygonShape polygon, Vector2 posB, float rotB);

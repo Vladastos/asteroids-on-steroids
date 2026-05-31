@@ -65,6 +65,24 @@ public sealed class CompoundShape : CollisionShape
         return deepest;
     }
 
+    public override bool Raycast(Vector2 origin, Vector2 dir, float maxDist,
+                                 Vector2 pos, float rot, out RayCastResult hit)
+    {
+        hit = default;
+        bool  any  = false;
+        float best = maxDist;
+        for (int i = 0; i < _parts.Length; i++)
+        {
+            if (_parts[i].Raycast(origin, dir, best, pos, rot, out var h))
+            {
+                best = h.Distance;
+                hit  = new RayCastResult(h.Distance, h.Point, h.Normal, partIndex: i);
+                any  = true;
+            }
+        }
+        return any;
+    }
+
     public override (Vector2 min, Vector2 max) GetAABB(Vector2 pos, float rot)
     {
         var min = new Vector2(float.MaxValue);

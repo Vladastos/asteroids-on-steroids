@@ -187,6 +187,60 @@ public sealed class PolygonShape : CollisionShape
     }
 
     // -------------------------------------------------------------------------
+    // Raycast — Cyrus-Beck clip of the ray against the convex half-planes
+    // -------------------------------------------------------------------------
+
+    public override bool Raycast(Vector2 origin, Vector2 dir, float maxDist,
+                                 Vector2 pos, float rot, out RayCastResult hit)
+    {
+        hit = default;
+        var verts    = TransformVertices(pos, rot);
+        var centroid = Centroid(verts);
+
+        float   tEnter = 0f, tExit = maxDist;
+        Vector2 enterNormal = Vector2.Zero;
+        bool    hasEnter = false;
+        int     n = verts.Length;
+
+        for (int i = 0; i < n; i++)
+        {
+            Vector2 a    = verts[i];
+            Vector2 edge = verts[(i + 1) % n] - a;
+
+            // Outward normal, oriented away from the centroid.
+            Vector2 nrm = new Vector2(-edge.Y, edge.X);
+            if (Vector2.Dot(nrm, a - centroid) < 0f) nrm = -nrm;
+            nrm = Vector2.Normalize(nrm);
+
+            float denom = Vector2.Dot(dir, nrm);
+            if (MathF.Abs(denom) < 1e-9f)
+            {
+                // Parallel to this edge: if the origin is on the outside, no hit.
+                if (Vector2.Dot(origin - a, nrm) > 0f) return false;
+                continue;
+            }
+
+            float t = Vector2.Dot(a - origin, nrm) / denom;
+            if (denom < 0f)            // entering the half-plane
+            {
+                if (t > tEnter) { tEnter = t; enterNormal = nrm; hasEnter = true; }
+            }
+            else                        // exiting the half-plane
+            {
+                if (t < tExit) tExit = t;
+            }
+            if (tEnter > tExit) return false;
+        }
+
+        if (!hasEnter) return false;             // origin inside, or grazing
+        if (tEnter < 0f || tEnter > maxDist) return false;
+
+        Vector2 point = origin + dir * tEnter;
+        hit = new RayCastResult(tEnter, point, enterNormal);
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
 
