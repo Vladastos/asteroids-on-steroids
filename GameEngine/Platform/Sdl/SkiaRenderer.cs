@@ -57,6 +57,24 @@ public sealed class SkiaRenderer : IRenderer, IDisposable
         _canvas.DrawPath(path, _fill);
     }
 
+    public void FillPath(ReadOnlySpan<Vector2> verts, ReadOnlySpan<int> contourLengths, Color color)
+    {
+        using var path = new SKPath();   // default FillType = Winding (nonzero) → seamless union
+        int off = 0;
+        foreach (int len in contourLengths)
+        {
+            if (len >= 3)
+            {
+                path.MoveTo(verts[off].X, verts[off].Y);
+                for (int i = 1; i < len; i++) path.LineTo(verts[off + i].X, verts[off + i].Y);
+                path.Close();
+            }
+            off += len;
+        }
+        _fill.Color = ToSk(color);
+        _canvas.DrawPath(path, _fill);
+    }
+
     public void DrawCircle(Vector2 center, float radius, Color color, float width = 1f)
     {
         _stroke.Color = ToSk(color); _stroke.StrokeWidth = width;

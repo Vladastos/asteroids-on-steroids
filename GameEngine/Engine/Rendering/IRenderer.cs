@@ -34,6 +34,12 @@ public interface IRenderer
     void DrawPolygon(ReadOnlySpan<Vector2> verts, Color color, float width = 1f);
     void FillPolygon(ReadOnlySpan<Vector2> verts, Color color);
 
+    /// <summary>Fills a multi-contour path as ONE region in a single draw, so adjacent
+    /// contours (e.g. all cells of a body) have no anti-aliasing seam between them.
+    /// Contours are concatenated in <paramref name="verts"/>; <paramref name="contourLengths"/>
+    /// gives each contour's vertex count. Nonzero winding.</summary>
+    void FillPath(ReadOnlySpan<Vector2> verts, ReadOnlySpan<int> contourLengths, Color color);
+
     void DrawCircle(Vector2 center, float radius, Color color, float width = 1f);
     void FillCircle(Vector2 center, float radius, Color color);
 

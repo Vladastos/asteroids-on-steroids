@@ -200,8 +200,16 @@ What do you think?
 ===================================
 ===================================
 
+Another important detail: the fracture zone radius and the blast radius should only be dependent on the density and fracture properties of the asteroid and the energy of the impact: it shouldn't simplly be relative to the asteroid diameter (however a minimum relative value should be set and the maximum is always to fracture the whole asteroid). The number of cuts too should not be hardcoded in the fracture properties (it should still be heavily dependent on them) but variable.
+For example a big hit to a small asteroid should completely shatter it, while small cumulative hits should just scrape the surface of a big asteroid.
+
 ===================================
 ===================================
+
+IMPORTANT
+I'm building a 2d game engine and working on an asteroid-like game engine. The focus is on realistic and complex physics-based destruction of asteroids that include rotation, realistic fracturing based on bullet mass, speed, asteroid density, rotation and size. The game should support concave compound shapes.
+
+Can you read the docs directory and give me some honest feedback on the current state? My approach may be wrong or limited. How would you do it? What are the best practices for things like these?
 
 ===================================
 ===================================

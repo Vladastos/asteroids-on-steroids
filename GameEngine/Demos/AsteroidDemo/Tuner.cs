@@ -1,16 +1,22 @@
-// Live-tunable parameter set. Up/Down selects a parameter, Left/Right adjusts it.
-// Parameters tagged [R] only take effect on the next asteroid spawn (press R).
+// Live-tunable parameter set, grouped by ownership (WEAPON / MATERIAL / PHYSICS / SPAWN).
+// Up/Down selects a parameter, Left/Right adjusts it. [R] = takes effect on next spawn.
+
+using AsteroidsEngine.Engine.Components;
 
 sealed class Param
 {
     public readonly string Name;
     public float Value;
     public readonly float Min, Max, Step;
+    public readonly bool IsHeader;
 
     public Param(string name, float value, float min, float max, float step)
     {
         Name = name; Value = value; Min = min; Max = max; Step = step;
     }
+
+    private Param(string header) { Name = header; IsHeader = true; }
+    public static Param Header(string name) => new(name);
 
     public void Adjust(int dir) => Value = Math.Clamp(Value + dir * Step, Min, Max);
 
@@ -32,50 +38,126 @@ sealed class Tuner
         return p;
     }
 
-    public void Move(int d)   { if (Params.Count > 0) Selected = (Selected + d + Params.Count) % Params.Count; }
-    public void Adjust(int d) { if (Params.Count > 0) Params[Selected].Adjust(d); }
+    public void Header(string name) => Params.Add(Param.Header(name));
+
+    public void Move(int d)
+    {
+        if (Params.Count == 0) return;
+        int n = Params.Count;
+        do { Selected = (Selected + d + n) % n; } while (Params[Selected].IsHeader);
+    }
+
+    public void Adjust(int d)
+    {
+        if (Params.Count > 0 && !Params[Selected].IsHeader) Params[Selected].Adjust(d);
+    }
+
+    public void SelectFirst()
+    {
+        for (int i = 0; i < Params.Count; i++)
+            if (!Params[i].IsHeader) { Selected = i; return; }
+    }
 }
 
-/// <summary>All tunable physics constants. Live ones are read at use; [R] ones are
-/// read when spawning asteroids.</summary>
+/// <summary>All tunable parameters, grouped by ownership. WEAPON params form the
+/// per-shot WeaponProfile; MATERIAL params are the per-body FractureProperties.</summary>
 sealed class Config
 {
     public readonly Tuner T = new();
 
-    // Weapon (live)
-    public readonly Param BulletSpeed, BulletMass, FireRate, EnergyScale, Directionality;
-    // Energy model (live)
-    public readonly Param SpinEnergyFrac, MomentumTransfer;
-    // Material (live — applied to all bodies each frame)
-    public readonly Param Brittleness, KineticFraction, MinFragArea;
-    // Body physics (live — applied to all bodies each frame)
+    // WEAPON — per-shot WeaponProfile
+    public readonly Param BulletSpeed, BulletMass, FireRate, EnergyScale,
+                          Directionality, MomentumTransfer, EjectFraction, ImpactSpin, Blast;
+    // MATERIAL — per-body FractureProperties
+    public readonly Param Brittleness, Toughness, SurfaceEff, SpinPreStress, KineticFraction, MinFragArea, Grain, Density;
+    // PHYSICS — live, all bodies
     public readonly Param Restitution, Friction, LinDrag, AngDrag, Thrust;
-    // Spawn-time ([R] to apply)
-    public readonly Param AstCount, AstRadius, AstSpeed, AstSpin, Grain, Toughness, Density;
+    // VFX — presentation; auto-modulated by impact energy / cell area / material
+    public readonly Param DustCount, DustSize, DustTtl, DustSpeed, DustSpread,
+                          FlashSize, FlashTtl, TracerLen, TracerWidth;
+    // FRACTURE — multi-frame crack pacing. CrackSteps is material-owned (preset fills it);
+    // CrackFrames is a global override. Speed = steps / (frames · fixedDt) pops/sec.
+    public readonly Param CrackSteps, CrackFrames;
+    // SPAWN
+    public readonly Param AstCount, AstRadius, AstSpeed, AstSpin;
 
     public Config()
     {
+        T.Header("-- WEAPON --");
         BulletSpeed      = T.Add("Bullet speed",     900f, 100f, 4000f, 50f);
         BulletMass       = T.Add("Bullet mass",      0.20f, 0.02f, 5f, 0.02f);
         FireRate         = T.Add("Fire cooldown",    0.12f, 0.02f, 1f, 0.02f);
         EnergyScale      = T.Add("Energy x",         1.0f, 0.1f, 30f, 0.1f);
         Directionality   = T.Add("Directionality",   0.40f, 0f, 1f, 0.05f);
-        SpinEnergyFrac   = T.Add("Spin energy frac", 0.35f, 0f, 2f, 0.05f);
-        MomentumTransfer = T.Add("Momentum xfer",    0.55f, 0f, 2f, 0.05f);
+        MomentumTransfer = T.Add("Bullet push",      0.01f, 0f, 1f, 0.01f);
+        EjectFraction    = T.Add("Eject speed",      0.08f, 0f, 0.5f, 0.01f);
+        ImpactSpin       = T.Add("Impact spin",      4f, 0f, 15f, 0.5f);
+        Blast            = T.Add("Blast (vaporise)", 0.30f, 0f, 1f, 0.05f);
+
+        T.Header("-- MATERIAL --");
         Brittleness      = T.Add("Brittleness",      0.60f, 0f, 1f, 0.05f);
+        Toughness        = T.Add("Toughness",        16f, 1f, 300f, 1f);
+        SurfaceEff       = T.Add("Surface eff.",     0.12f, 0.01f, 1f, 0.01f);
+        SpinPreStress    = T.Add("Spin pre-stress",  0.12f, 0f, 2f, 0.02f);
         KineticFraction  = T.Add("Kinetic frac",     0.35f, 0f, 1f, 0.05f);
         MinFragArea      = T.Add("Min frag area",    180f, 20f, 2000f, 20f);
+        Grain            = T.Add("Grain [R]",        1400f, 300f, 6000f, 100f);
+        Density          = T.Add("Density [R]",      1.4f, 0.2f, 5f, 0.1f);
+
+        T.Header("-- PHYSICS --");
         Restitution      = T.Add("Restitution",      0.30f, 0f, 1f, 0.05f);
         Friction         = T.Add("Friction",         0.20f, 0f, 1f, 0.05f);
         LinDrag          = T.Add("Linear drag",      0.05f, 0f, 2f, 0.05f);
         AngDrag          = T.Add("Angular drag",     0.05f, 0f, 2f, 0.05f);
         Thrust           = T.Add("Thrust",           900f, 0f, 6000f, 50f);
-        AstCount         = T.Add("Asteroids [R]",    6f, 1f, 40f, 1f);
-        AstRadius        = T.Add("Radius [R]",       110f, 40f, 250f, 10f);
-        AstSpeed         = T.Add("Speed [R]",        45f, 0f, 300f, 5f);
-        AstSpin          = T.Add("Spin [R]",         0.6f, 0f, 5f, 0.1f);
-        Grain            = T.Add("Grain [R]",        1400f, 300f, 6000f, 100f);
-        Toughness        = T.Add("Toughness [R]",    16f, 1f, 200f, 1f);
-        Density          = T.Add("Density [R]",      1.4f, 0.2f, 5f, 0.1f);
+
+        T.Header("-- VFX --");
+        DustCount        = T.Add("Dust count",       14f, 0f, 60f, 1f);
+        DustSize         = T.Add("Dust size",        2.6f, 0.5f, 10f, 0.2f);
+        DustTtl          = T.Add("Dust ttl",         0.70f, 0.1f, 3f, 0.1f);
+        DustSpeed        = T.Add("Dust speed",       60f, 0f, 400f, 10f);
+        DustSpread       = T.Add("Dust spread",      0.50f, 0f, 1f, 0.05f);
+        FlashSize        = T.Add("Flash size",       22f, 0f, 120f, 2f);
+        FlashTtl         = T.Add("Flash ttl",        0.12f, 0.02f, 0.6f, 0.02f);
+        TracerLen        = T.Add("Tracer length",    26f, 0f, 120f, 2f);
+        TracerWidth      = T.Add("Tracer width",     2f, 0.5f, 8f, 0.5f);
+
+        T.Header("-- FRACTURE --");
+        CrackSteps       = T.Add("Crack steps/it",   2f, 1f, 30f, 1f);
+        CrackFrames      = T.Add("Frames/iter",      1f, 1f, 20f, 1f);
+
+        T.Header("-- SPAWN [R] --");
+        AstCount         = T.Add("Asteroids",        6f, 1f, 40f, 1f);
+        AstRadius        = T.Add("Radius",           110f, 40f, 250f, 10f);
+        AstSpeed         = T.Add("Speed",            45f, 0f, 300f, 5f);
+        AstSpin          = T.Add("Spin",             0.6f, 0f, 5f, 0.1f);
+
+        T.SelectFirst();
+    }
+
+    // ---- Material presets (cycle with M, then they fill the MATERIAL sliders) ----
+    private static readonly (string Name, FractureProperties Mat)[] Presets =
+    {
+        ("Rock",  FractureProperties.Rock),
+        ("Glass", FractureProperties.Glass),
+        ("Ice",   FractureProperties.Ice),
+        ("Metal", FractureProperties.Metal),
+    };
+    private int _matIndex;
+    public string MaterialName => Presets[_matIndex].Name;
+
+    public void CycleMaterial()
+    {
+        _matIndex = (_matIndex + 1) % Presets.Length;
+        var m = Presets[_matIndex].Mat;
+        Brittleness.Value     = m.Brittleness;
+        Toughness.Value       = m.Toughness;
+        SurfaceEff.Value      = m.SurfaceEfficiency;
+        SpinPreStress.Value   = m.SpinPreStress;
+        KineticFraction.Value = m.KineticFraction;
+        MinFragArea.Value     = m.MinFragmentArea;
+        Grain.Value           = m.GrainArea;
+        Density.Value         = m.Density;
+        CrackSteps.Value      = m.CrackSpeed;
     }
 }

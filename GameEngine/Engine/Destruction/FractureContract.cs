@@ -15,7 +15,12 @@ public struct FractureInput
     public Vector2 ImpactDir;         // shot direction (steers the directional crack cone)
     public float   Directionality;    // 0 = isotropic splash … 1 = forward channel
     public float   SpinOmega;         // body angular velocity (centrifugal pre-stress)
-    public Vector2 MomentumKick;      // bullet momentum added to all fragments' linear velocity
+    // Note: SurfaceEfficiency and SpinPreStress are MATERIAL properties — the
+    // simulator reads them from the body's FractureProperties, not from here.
+    public Vector2 MomentumKick;      // directional push (along the shot) added to all fragments
+    public float   EjectSpeed;        // base radial scatter speed away from the impact (px/s)
+    public float   ImpactSpin;        // rad/s scale for impact-induced (shear) fragment spin
+    public float   BlastFraction;     // cells with crack energy ≥ this × impact energy vaporise (0 = off)
 
     public Vector2 BodyPosition;      // Transform.Position (world centroid)
     public float   BodyRotation;

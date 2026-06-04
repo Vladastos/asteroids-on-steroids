@@ -17,6 +17,17 @@ public readonly struct Color : IEquatable<Color>
     /// <summary>Returns this colour with a replaced alpha channel.</summary>
     public Color WithAlpha(byte a) => new(R, G, B, a);
 
+    /// <summary>Linear interpolation between two colours (incl. alpha); t clamped to [0,1].</summary>
+    public static Color Lerp(Color a, Color b, float t)
+    {
+        t = t < 0f ? 0f : t > 1f ? 1f : t;
+        return new Color(
+            (byte)(a.R + (b.R - a.R) * t),
+            (byte)(a.G + (b.G - a.G) * t),
+            (byte)(a.B + (b.B - a.B) * t),
+            (byte)(a.A + (b.A - a.A) * t));
+    }
+
     public static readonly Color White       = new(255, 255, 255);
     public static readonly Color Black        = new(0, 0, 0);
     public static readonly Color Transparent  = new(0, 0, 0, 0);

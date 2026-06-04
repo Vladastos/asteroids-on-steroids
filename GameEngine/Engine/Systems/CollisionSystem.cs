@@ -28,6 +28,7 @@ public sealed class CollisionSystem : ISystem
     private readonly List<Entity>        _candidates  = new();
     private readonly HashSet<(int, int)> _testedPairs = new();
     private readonly List<Contact>       _contacts    = new();
+    private readonly List<ContactInfo>   _hitBuf      = new();
 
     public bool ResolveOverlap { get; set; } = true;
 
@@ -42,6 +43,8 @@ public sealed class CollisionSystem : ISystem
     private const float AngSleepTol   = 0.12f;  // rad/s
     private const float SleepTime     = 0.5f;   // s below tolerance before sleeping
     private const float RestitutionVelThreshold = 30f; // below this approach speed, no bounce
+    private const float PenetrationSlop   = 0.5f;      // allowed overlap (px) before correcting
+    private const float CorrectionPercent = 0.4f;      // fraction of penetration fixed per frame
 
     public CollisionSystem(ISpatialIndex spatial, EventBus bus)
     {
@@ -87,17 +90,33 @@ public sealed class CollisionSystem : ISystem
 
                 ref var tB = ref world.GetComponent<Transform>(entityB);
 
-                var contact = cA.Shape.Intersects(tA.Position, tA.Rotation,
-                                                   cB.Shape, tB.Position, tB.Rotation);
-                if (contact == null) continue;
+                // Collect a contact manifold (multiple points for compound bodies).
+                _hitBuf.Clear();
+                CollectPairContacts(cA.Shape, tA.Position, tA.Rotation,
+                                    cB.Shape, tB.Position, tB.Rotation, _hitBuf);
+                if (_hitBuf.Count == 0) continue;
+
+                // Force every normal to point from B toward A (the direction A moves to
+                // separate). The polygon SAT path returns the opposite sign, so without
+                // this the solver pushes bodies together. Orient by relative position.
+                Vector2 ab = tA.Position - tB.Position;
+                for (int k = 0; k < _hitBuf.Count; k++)
+                    if (Vector2.Dot(_hitBuf[k].Normal, ab) < 0f)
+                        _hitBuf[k] = _hitBuf[k].Flipped();
+
+                // Deepest contact drives positional correction + the gameplay event.
+                ContactInfo deepest = _hitBuf[0];
+                for (int k = 1; k < _hitBuf.Count; k++)
+                    if (_hitBuf[k].Depth > deepest.Depth) deepest = _hitBuf[k];
 
                 if (ResolveOverlap)
                 {
-                    TrySeparate  (world, entityA, ref tA, entityB, ref tB, contact.Value);
-                    GatherContact(world, entityA, entityB, contact.Value);
+                    TrySeparate(world, entityA, ref tA, entityB, ref tB, deepest);
+                    for (int k = 0; k < _hitBuf.Count; k++)
+                        GatherContact(world, entityA, entityB, _hitBuf[k]);
                 }
 
-                _bus.Publish(new CollisionEvent(entityA, entityB, contact.Value));
+                _bus.Publish(new CollisionEvent(entityA, entityB, deepest));
             }
         });
 
@@ -131,9 +150,40 @@ public sealed class CollisionSystem : ISystem
         float total  = massA + massB;
         float shareA = total > 0f ? massB / total : 0.5f;
 
-        var correction = contact.Normal * contact.Depth;
+        // Gentle Baumgarte-style correction: fix only a fraction of the penetration
+        // beyond a small slop, so deep multi-cell overlaps resolve over a few frames
+        // instead of teleporting (which flings bodies and spins them up).
+        float corr = MathF.Max(0f, contact.Depth - PenetrationSlop) * CorrectionPercent;
+        if (corr <= 0f) return;
+        var correction = contact.Normal * corr;
         tA.Position += correction *  shareA;
         tB.Position -= correction * (1f - shareA);
+    }
+
+    /// <summary>
+    /// Builds the contact set for a pair. Compound shapes yield a manifold (one
+    /// contact per overlapping part); simple shapes yield a single contact. All
+    /// normals point from B into A.
+    /// </summary>
+    private static void CollectPairContacts(
+        CollisionShape sa, Vector2 pa, float ra,
+        CollisionShape sb, Vector2 pb, float rb, List<ContactInfo> outList)
+    {
+        if (sa is CompoundShape ca)
+        {
+            ca.CollectContacts(pa, ra, sb, pb, rb, outList);            // normals B→A
+        }
+        else if (sb is CompoundShape cb)
+        {
+            int start = outList.Count;
+            cb.CollectContacts(pb, rb, sa, pa, ra, outList);            // normals A→B
+            for (int i = start; i < outList.Count; i++) outList[i] = outList[i].Flipped();
+        }
+        else
+        {
+            var c = sa.Intersects(pa, ra, sb, pb, rb);
+            if (c != null) outList.Add(c.Value);
+        }
     }
 
     /// <summary>

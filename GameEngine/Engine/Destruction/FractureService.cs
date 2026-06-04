@@ -4,16 +4,27 @@ using AsteroidsEngine.Engine.Core;
 
 namespace AsteroidsEngine.Engine.Destruction;
 
-/// <summary>Tunable constants of the energy model (docs/destruction_engine_spec.md §4.4–4.5).</summary>
-public struct FractureSettings
+/// <summary>
+/// Per-shot weapon/projectile parameters — the impactor's contribution to a fracture.
+/// Different bullet types carry different WeaponProfiles. Material-intrinsic params
+/// (toughness, brittleness, SurfaceEfficiency, SpinPreStress, …) live on the body's
+/// FractureProperties instead. (docs/destruction_engine_spec.md §4.)
+/// </summary>
+public struct WeaponProfile
 {
-    public float SpinEnergyFraction;   // fraction of ½Iω² treated as fracture pre-stress energy
-    public float MomentumTransfer;     // fraction of bullet momentum imparted to fragments
+    public float Directionality;       // 0 = isotropic splash … 1 = forward channel
+    public float MomentumTransfer;     // forward push along the shot, as a fraction of bullet speed
+    public float EjectFraction;        // radial scatter, as a fraction of bullet speed
+    public float ImpactSpin;           // rad/s scale for impact-induced shear spin on fragments
+    public float BlastFraction;        // vaporisation crater: 0 = none (pure fragmentation) … 1 = total
 
-    public static FractureSettings Default => new()
+    public static WeaponProfile Default => new()
     {
-        SpinEnergyFraction = 0.35f,
-        MomentumTransfer   = 0.55f,
+        Directionality   = 0.4f,
+        MomentumTransfer = 0.01f,
+        EjectFraction    = 0.08f,
+        ImpactSpin       = 4f,
+        BlastFraction    = 0.3f,
     };
 }
 
@@ -31,14 +42,14 @@ public static class FractureService
     public static bool TryFracture(
         World world, Entity body, int struckCell,
         Vector2 impactPoint, Vector2 impactDir, Vector2 impactorVelocity, float impactorMass,
-        float directionality, Random rng, out FractureResult result)
+        Random rng, out FractureResult result)
         => TryFracture(world, body, struckCell, impactPoint, impactDir, impactorVelocity,
-                       impactorMass, directionality, FractureSettings.Default, rng, out result);
+                       impactorMass, WeaponProfile.Default, rng, out result);
 
     public static bool TryFracture(
         World world, Entity body, int struckCell,
         Vector2 impactPoint, Vector2 impactDir, Vector2 impactorVelocity, float impactorMass,
-        float directionality, in FractureSettings settings, Random rng, out FractureResult result)
+        in WeaponProfile weapon, Random rng, out FractureResult result)
     {
         result = default;
 
@@ -48,16 +59,16 @@ public static class FractureService
             !world.HasComponent<RigidBody>(body)) return false;
 
         ref var fb = ref world.GetComponent<FracturableBody>(body);
-        ref var t  = ref world.GetComponent<Transform>(body);
+        ref var t = ref world.GetComponent<Transform>(body);
         ref var rb = ref world.GetComponent<RigidBody>(body);
         if (fb.Cells.Length == 0) return false;
 
-        Vector2 bodyLinear  = Vector2.Zero;
-        float   bodyAngular = 0f;
+        Vector2 bodyLinear = Vector2.Zero;
+        float bodyAngular = 0f;
         if (world.HasComponent<Velocity>(body))
         {
             ref var v = ref world.GetComponent<Velocity>(body);
-            bodyLinear  = v.Linear;
+            bodyLinear = v.Linear;
             bodyAngular = v.Angular;
         }
 
@@ -67,31 +78,38 @@ public static class FractureService
             cell = NearestCell(fb, t.Position, t.Rotation, impactPoint);
 
         // --- Energy model ---
-        Vector2 dir   = impactDir.LengthSquared() > 1e-8f ? Vector2.Normalize(impactDir) : Vector2.UnitX;
-        float   mBody = rb.Mass;
-        float   vRelN = MathF.Abs(Vector2.Dot(impactorVelocity - bodyLinear, dir));
-        float   mRed  = (impactorMass + mBody) > 0f ? impactorMass * mBody / (impactorMass + mBody) : impactorMass;
-        float   eImpact = 0.5f * mRed * vRelN * vRelN;
-        float   eSpin   = settings.SpinEnergyFraction * 0.5f * rb.Inertia * bodyAngular * bodyAngular;
+        Vector2 dir = impactDir.LengthSquared() > 1e-8f ? Vector2.Normalize(impactDir) : Vector2.UnitX;
+        float mBody = rb.Mass;
+        float vRelN = MathF.Abs(Vector2.Dot(impactorVelocity - bodyLinear, dir));
+        float mRed = (impactorMass + mBody) > 0f ? impactorMass * mBody / (impactorMass + mBody) : impactorMass;
+        // Impact energy only. Spin does NOT add energy (rotational KE of a heavy body
+        // dwarfs a bullet by orders of magnitude); spin acts as a bounded bond
+        // pre-stress in the simulator instead.
+        float eImpact = 0.5f * mRed * vRelN * vRelN;
 
-        Vector2 kick = mBody > 1e-6f
-            ? dir * (impactorVelocity.Length() * impactorMass / mBody * settings.MomentumTransfer)
-            : Vector2.Zero;
+        // Fragment dynamics are scaled to bullet SPEED (intuitive + visible), not to
+        // physical momentum (which is negligible for a light bullet vs a heavy body).
+        float bulletSpeed = impactorVelocity.Length();
+        Vector2 kick = dir * (bulletSpeed * weapon.MomentumTransfer);
+        float ejectSpeed = bulletSpeed * weapon.EjectFraction;
 
         var input = new FractureInput
         {
-            StruckCell       = cell,
-            EnergyTotal      = eImpact + eSpin,
+            StruckCell = cell,
+            EnergyTotal = eImpact,
             ImpactPointWorld = impactPoint,
-            ImpactDir        = dir,
-            Directionality   = directionality,
-            SpinOmega        = bodyAngular,
-            MomentumKick     = kick,
-            BodyPosition     = t.Position,
-            BodyRotation     = t.Rotation,
-            BodyLinear       = bodyLinear,
-            BodyAngular      = bodyAngular,
-            BodyMass         = mBody,
+            ImpactDir = dir,
+            Directionality = weapon.Directionality,
+            SpinOmega = bodyAngular,
+            MomentumKick = kick,
+            EjectSpeed = ejectSpeed,
+            ImpactSpin = weapon.ImpactSpin,
+            BlastFraction = weapon.BlastFraction,
+            BodyPosition = t.Position,
+            BodyRotation = t.Rotation,
+            BodyLinear = bodyLinear,
+            BodyAngular = bodyAngular,
+            BodyMass = mBody,
         };
 
         result = FractureSimulator.Simulate(fb, input, rng);
@@ -104,13 +122,114 @@ public static class FractureService
         return true;
     }
 
+    /// <summary>
+    /// Multi-frame counterpart of <see cref="TryFracture"/>. Computes the same impact
+    /// energy, then — instead of fracturing atomically — seeds a crack front that
+    /// <see cref="FractureCrackSystem"/> advances over the next frames. A hit on a body
+    /// that is already cracking pushes another co-propagating front onto its process.
+    /// Sub-threshold hits accumulate energy in place (no front), as in the atomic path.
+    /// Results arrive asynchronously via CellPulverizedEvent / FractureCompletedEvent.
+    /// </summary>
+    public static void BeginFracture(
+        World world, Entity body, int struckCell,
+        Vector2 impactPoint, Vector2 impactDir, Vector2 impactorVelocity, float impactorMass,
+        in WeaponProfile weapon, in FractureTiming timing, Random rng)
+    {
+        if (!world.IsAlive(body)) return;
+        if (!world.HasComponent<FracturableBody>(body) ||
+            !world.HasComponent<Transform>(body) ||
+            !world.HasComponent<RigidBody>(body)) return;
+
+        ref var fb = ref world.GetComponent<FracturableBody>(body);
+        ref var t = ref world.GetComponent<Transform>(body);
+        ref var rb = ref world.GetComponent<RigidBody>(body);
+        if (fb.Cells.Length == 0) return;
+
+        Vector2 bodyLinear = Vector2.Zero;
+        float bodyAngular = 0f;
+        if (world.HasComponent<Velocity>(body))
+        {
+            ref var v = ref world.GetComponent<Velocity>(body);
+            bodyLinear = v.Linear;
+            bodyAngular = v.Angular;
+        }
+
+        int cell = struckCell;
+        if (cell < 0 || cell >= fb.Cells.Length)
+            cell = NearestCell(fb, t.Position, t.Rotation, impactPoint);
+
+        // Same energy model as TryFracture (reduced-mass impact energy).
+        Vector2 dir = impactDir.LengthSquared() > 1e-8f ? Vector2.Normalize(impactDir) : Vector2.UnitX;
+        float mBody = rb.Mass;
+        float vRelN = MathF.Abs(Vector2.Dot(impactorVelocity - bodyLinear, dir));
+        float mRed = (impactorMass + mBody) > 0f ? impactorMass * mBody / (impactorMass + mBody) : impactorMass;
+        float eImpact = 0.5f * mRed * vRelN * vRelN;
+
+        var budget = FractureSimulator.ComputeBudget(fb, cell, mBody, eImpact);
+        if (!budget.Fractured)
+        {
+            fb.State.AbsorbedEnergy = budget.Absorbed;   // sub-threshold: accumulate, no front
+            return;
+        }
+
+        float bulletSpeed = impactorVelocity.Length();
+        Vector2 kick = dir * (bulletSpeed * weapon.MomentumTransfer);
+        float ejectSpeed = bulletSpeed * weapon.EjectFraction;
+
+        // Crack front for this hit: struck cell holds the full impact energy, spends the
+        // surface budget; blast threshold matches the atomic path (1-blast)·E.
+        float rc = MathF.Cos(t.Rotation), rs = MathF.Sin(t.Rotation);
+        Vector2 dirLocal = new(dir.X * rc + dir.Y * rs, -dir.X * rs + dir.Y * rc);
+        float blast = Math.Clamp(weapon.BlastFraction, 0f, 1f);
+        float blastThresh = blast > 0f ? (1f - blast) * eImpact : float.PositiveInfinity;
+        float transmission = FractureSimulator.TransmissionFor(fb.Material.Brittleness);
+
+        var energy = new float[fb.Cells.Length];
+        var front = CrackFront.Seed(energy, cell, eImpact, budget.Surface,
+                                    dirLocal, weapon.Directionality, transmission, blastThresh);
+
+        if (world.HasComponent<FractureProcess>(body))
+        {
+            // Co-propagate: add the front, refresh the fling snapshot to the latest hit.
+            ref var fp = ref world.GetComponent<FractureProcess>(body);
+            fp.Fronts.Add(front);
+            fp.ImpactDir = dir;
+            fp.ImpactPointWorld = impactPoint;
+            fp.MomentumKick = kick;
+            fp.EjectSpeed = ejectSpeed;
+            fp.ImpactSpin = weapon.ImpactSpin;
+            fp.Directionality = weapon.Directionality;
+            return;
+        }
+
+        var (eff, adj) = FractureSimulator.PrepareGraph(fb, bodyAngular);
+        world.AddComponent(body, new FractureProcess
+        {
+            Fronts = new List<CrackFront> { front },
+            Broken = new bool[fb.Bonds.Length],
+            Pulverized = new bool[fb.Cells.Length],
+            Eff = eff,
+            Adj = adj,
+            ImpactDir = dir,
+            ImpactPointWorld = impactPoint,
+            MomentumKick = kick,
+            EjectSpeed = ejectSpeed,
+            ImpactSpin = weapon.ImpactSpin,
+            Directionality = weapon.Directionality,
+            StepsPerIteration = timing.StepsPerIteration < 1 ? 1 : timing.StepsPerIteration,
+            FramesPerIteration = timing.FramesPerIteration < 1 ? 1 : timing.FramesPerIteration,
+            FrameCounter = 0,
+            Done = false,
+        });
+    }
+
     private static int NearestCell(in FracturableBody fb, Vector2 pos, float rot, Vector2 worldPoint)
     {
         float cos = MathF.Cos(rot), sin = MathF.Sin(rot);
         Vector2 d = worldPoint - pos;
         Vector2 local = new(d.X * cos + d.Y * sin, -d.X * sin + d.Y * cos);   // un-rotate into body space
 
-        int   best   = 0;
+        int best = 0;
         float bestSq = float.MaxValue;
         for (int i = 0; i < fb.Cells.Length; i++)
         {

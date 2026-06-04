@@ -117,6 +117,26 @@ public sealed class CompoundShape : CollisionShape
         return deepest;
     }
 
+    /// <summary>
+    /// Collects a contact for EACH of this compound's parts that overlaps
+    /// <paramref name="other"/> — a contact manifold rather than a single deepest
+    /// contact. Each ContactInfo.Normal points from <paramref name="other"/> into
+    /// this compound (the standard A.Intersects(other) convention). A manifold is
+    /// what lets the solver separate multi-cell overlaps and balance torque.
+    /// </summary>
+    public void CollectContacts(Vector2 posA, float rotA, CollisionShape other,
+                                Vector2 posB, float rotB, List<ContactInfo> outList)
+    {
+        var (wmin, wmax) = other.GetAABB(posB, rotB);
+        var (qmin, qmax) = WorldAabbToLocal(wmin, wmax, posA, rotA);
+        for (int i = 0; i < _parts.Length; i++)
+        {
+            if (!Overlaps(_localAabbs[i], qmin, qmax)) continue;
+            var c = _parts[i].Intersects(posA, rotA, other, posB, rotB);
+            if (c != null) outList.Add(c.Value);
+        }
+    }
+
     public override (Vector2 min, Vector2 max) GetAABB(Vector2 pos, float rot)
     {
         // O(1): transform the four corners of the precomputed local bounds.

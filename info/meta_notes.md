@@ -78,12 +78,23 @@ I want to design and plan thoroughly the game, analyze doability and potential p
 
 ### TODO
 
-1. Compound shape collision.
-2. Refine the 3-phase split algorithm.
-    1. See if the the remaining far-side pieces combined create always create convex shapes.
-    2. Blast zone logic needs to be reviewed, fractures are almost never eligible to be discarded.
-3. Sometimes compound shapes aren't connected.
-4. Decide the behaviour of fracturing on compound shapes.
-5. Add sounds and images.
-6. Add shockwaves and grenades.
-7. Add piercing bullets.
+Right neow:
+1. Visual effects for dust, obliteration of cells and bullet trajectory.
+2. Cells stuck together should be rendered as one.
+3. Bullet push is too high right now
+4. Make clarity on what parameters belong to which components and events: different types of bullets should be able to have different directionality, different bullet push, different blast, different ejection speed and impact spin etc. Some parameters belong to the material (cells) and others to the edges
+5. Would be cool to make the fragmentation be longer than one frame, making the energy do a bfs on the graph one step per frame.
+6. Test different materials (rock, glass, etc.)
+
+Next step: Make the Game Design
+1. World map size: 4X normal window size (1920x1080), independent on the actual window size used
+2. Wave system (time based), some asteroids grow tougher and bigger while others faster and spinnier. 
+3. Aliens start spawning at some point, preconstructed bodies of a different color with a basic AI that follows the player and start shooting sporadically when in range.
+4. Objective: score system and local leaderboard.
+5. Damage system: the player takes damage relative to the impacts he's hit with.
+5. Add music
+
+Later:
+1. Add sounds and images.
+2. Add shockwaves and grenades.
+3. Add piercing bullets.
