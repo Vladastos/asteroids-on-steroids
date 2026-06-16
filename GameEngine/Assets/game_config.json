@@ -193,10 +193,6 @@
         "roughness": 0.3,
         "noiseFrequency": 4,
         "concavityBias": 0.1,
-        "seedCount": [
-          70,
-          100
-        ],
         "seedClusterCenter": 0.0
       },
       "material": "rock",
@@ -210,7 +206,6 @@
       ],
       "densityMult": 1,
       "baseCost": 1,
-      "baseCells": 7,
       "speedRange": [
         60,
         150
@@ -227,10 +222,6 @@
         "roughness": 0.22,
         "noiseFrequency": 3,
         "concavityBias": 0.7,
-        "seedCount": [
-          170,
-          250
-        ],
         "seedClusterCenter": 0.25
       },
       "material": "rock",
@@ -244,7 +235,6 @@
       ],
       "densityMult": 1,
       "baseCost": 3,
-      "baseCells": 12,
       "speedRange": [
         30,
         90
@@ -261,10 +251,6 @@
         "roughness": 0.18,
         "noiseFrequency": 2,
         "concavityBias": 0.02,
-        "seedCount": [
-          50,
-          80
-        ],
         "seedClusterCenter": 0.2,
         "bondMultDistribution": {
           "type": "radialGradient",
@@ -285,7 +271,6 @@
       ],
       "densityMult": 1,
       "baseCost": 4,
-      "baseCells": 12,
       "speedRange": [
         25,
         75
@@ -302,10 +287,6 @@
         "roughness": 0.12,
         "noiseFrequency": 2,
         "concavityBias": 0.02,
-        "seedCount": [
-          80,
-          140
-        ],
         "seedClusterCenter": 0.5,
         "bondMultDistribution": {
           "type": "radialGradient",
@@ -333,7 +314,6 @@
       ],
       "densityMult": 2.5,
       "baseCost": 8,
-      "baseCells": 25,
       "speedRange": [
         20,
         55
@@ -350,10 +330,6 @@
         "roughness": 0.14,
         "noiseFrequency": 3,
         "concavityBias": 0.03,
-        "seedCount": [
-          70,
-          110
-        ],
         "seedClusterCenter": 0.4,
         "bondMultDistribution": {
           "type": "radialGradient",
@@ -381,7 +357,6 @@
       ],
       "densityMult": 1,
       "baseCost": 10,
-      "baseCells": 15,
       "speedRange": [
         25,
         60
@@ -398,10 +373,6 @@
         "roughness": 0.35,
         "noiseFrequency": 5,
         "concavityBias": 0.15,
-        "seedCount": [
-          60,
-          100
-        ],
         "seedClusterCenter": 0.1,
         "bondMultDistribution": {
           "type": "noiseClusters",
@@ -429,7 +400,6 @@
       ],
       "densityMult": 1,
       "baseCost": 5,
-      "baseCells": 12,
       "speedRange": [
         40,
         110

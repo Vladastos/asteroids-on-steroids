@@ -396,6 +396,17 @@ sealed class DemoSession
         return total;
     }
 
+    // Expected Voronoi cell count for an asteroid of the given type and size.
+    // Derived purely from geometry: area / GrainArea — the same formula BuildProceduralAsteroid uses.
+    // Automatically stays in sync when GrainArea is changed in the material config.
+    private float CellsFor(AsteroidConfig ac, float sizeMult)
+    {
+        if (ac.Procedural == null) return 1f;
+        if (!_gc.Materials.TryGetValue(ac.Material, out var mc)) return 1f;
+        float r = ac.Procedural.BaseRadius * sizeMult;
+        return MathF.Max(1f, MathF.PI * r * r / mc.GrainArea);
+    }
+
     private static Dictionary<string, float> DefaultBias(int wave) => new()
     {
         ["gravel"] = 0.05f,
@@ -427,7 +438,7 @@ sealed class DemoSession
                 if (ac.UnlockWave > _waveNumber) continue;
                 float minMult = ac.SizeRange[0];
                 if (ac.BaseCost * minMult > remBudget) continue;
-                if (ac.BaseCells * minMult > remCells) continue;
+                if (CellsFor(ac, minMult) > remCells) continue;
                 candidates.Add((key, ac, w));
             }
             if (candidates.Count == 0) break;
@@ -438,8 +449,13 @@ sealed class DemoSession
             (string chosenKey, AsteroidConfig chosenAc, float _) = candidates[0];
             foreach (var c in candidates) { cum += c.w; if (r <= cum) { chosenKey = c.key; chosenAc = c.ac; break; } }
 
+            // Budget constraint: linear in sizeMult.
             float maxByBudget = remBudget / chosenAc.BaseCost;
-            float maxByCells = remCells / chosenAc.BaseCells;
+            // Cell constraint: cells ∝ radius² ∝ sizeMult² → invert quadratically.
+            // CellsFor(ac, mult) = π × (BaseRadius × mult)² / GrainArea = k × mult²
+            // solve k × mult² = remCells → mult = sqrt(remCells / k) where k = CellsFor(ac, 1)
+            float kUnit = CellsFor(chosenAc, 1f);
+            float maxByCells = MathF.Sqrt(remCells / kUnit);
             float maxMult = Math.Min(chosenAc.SizeRange[1], Math.Min(maxByBudget, maxByCells));
             float minMult0 = chosenAc.SizeRange[0];
             if (maxMult < minMult0) break;
@@ -449,7 +465,7 @@ sealed class DemoSession
 
             result.Add((chosenKey, sizeMult));
             remBudget -= chosenAc.BaseCost * sizeMult;
-            remCells -= chosenAc.BaseCells * sizeMult;
+            remCells  -= CellsFor(chosenAc, sizeMult);
         }
         return result;
     }
@@ -503,7 +519,7 @@ sealed class DemoSession
             if (!typeCount.TryGetValue(key, out var lst)) typeCount[key] = lst = new List<float>();
             lst.Add(sm);
             if (_gc.Asteroids.TryGetValue(key, out var ac))
-                totalCells += (int)(ac.BaseCells * sm);
+                totalCells += (int)CellsFor(ac, sm);
         }
 
         // Build banner strings
@@ -520,11 +536,11 @@ sealed class DemoSession
         _waveLog.WriteLine($"  {spawns.Count} asteroids   ~{totalCells} cells total");
         foreach (var (key, mults) in typeCount)
         {
-            int cellsEst = _gc.Asteroids.TryGetValue(key, out var ac)
-                ? mults.Sum(m => (int)(ac.BaseCells * m)) : 0;
+            _gc.Asteroids.TryGetValue(key, out var ac);
+            int cellsEst = ac != null ? mults.Sum(m => (int)CellsFor(ac, m)) : 0;
             string sizeStr = string.Join(" ", mults.Select(m => $"{m:0.00}"));
-            string cellStr = _gc.Asteroids.TryGetValue(key, out ac)
-                ? string.Join(" ", mults.Select(m => $"~{(int)(ac.BaseCells * m)}")) : "?";
+            string cellStr = ac != null
+                ? string.Join(" ", mults.Select(m => $"~{(int)CellsFor(ac, m)}")) : "?";
             _waveLog.WriteLine($"  {key,-10} x{mults.Count}   sizes: {sizeStr}   cells: {cellStr}   subtotal≈{cellsEst}");
         }
     }
@@ -698,8 +714,8 @@ sealed class DemoSession
         foreach (var v in convex) maxR = MathF.Max(maxR, v.Length());
         if (maxR < 1f) maxR = 1f;
 
-        // 4. Explicit seed scatter using config count + cluster bias
-        int seedCount = _rng.Next(proc.SeedCount[0], proc.SeedCount[1] + 1);
+        // 4. Seed count derived from area / GrainArea — same source as CellsFor() in the wave manager.
+        int seedCount = Math.Clamp((int)(MathF.PI * radius * radius / mat.GrainArea), 4, 600);
         var seeds = ScatterSeedsProc(convex, seedCount, proc.SeedClusterCenter);
 
         // 5. Per-seed bond mult from BondMultDistribution

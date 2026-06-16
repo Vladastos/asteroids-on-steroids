@@ -54,8 +54,7 @@ static class ConfigEditorDefs
             // Arrays need explicit lambdas; expression trees can't assign array elements.
             .SliderInt("Verts Min", p => p.VertexCount[0], (p, v) => p.VertexCount[0] = v, 4, 24)
             .SliderInt("Verts Max", p => p.VertexCount[1], (p, v) => p.VertexCount[1] = v, 4, 32)
-            .SliderInt("Seeds Min", p => p.SeedCount[0],   (p, v) => p.SeedCount[0]   = v, 3, 20)
-            .SliderInt("Seeds Max", p => p.SeedCount[1],   (p, v) => p.SeedCount[1]   = v, 3, 30);
+            ;
 
     // ── Skill (base fields shared by all skill types) ─────────────────────────
     public static readonly EditorDef<SkillConfig> Skill =

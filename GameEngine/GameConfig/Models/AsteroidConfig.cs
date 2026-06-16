@@ -17,8 +17,6 @@ public class AsteroidConfig
     public float                     DensityMult { get; set; } = 1f;
     /// <summary>Abstract cost per unit of size_mult for the wave budget system.</summary>
     public int                       BaseCost    { get; set; } = 3;
-    /// <summary>Estimated cell count per unit of size_mult for the wave cell-cap check.</summary>
-    public int                       BaseCells   { get; set; } = 12;
     /// <summary>[min, max] initial speed (px/s). Direction is inward from the spawn border.</summary>
     public float[]                   SpeedRange  { get; set; } = [30f, 90f];
     /// <summary>First wave this type can appear on (wave director may still suppress it via zero bias).</summary>
@@ -36,8 +34,6 @@ public class ProceduralAsteroidConfig
     public float  NoiseFrequency    { get; set; } = 3f;
     /// <summary>Probability [0,1] of an inward dent per vertex.</summary>
     public float  ConcavityBias     { get; set; } = 0.05f;
-    /// <summary>[min, max] number of Voronoi seeds to scatter.</summary>
-    public int[]  SeedCount         { get; set; } = [6, 10];
     /// <summary>[0,1] bias toward placing seeds near the centroid (0 = uniform, 1 = all central).</summary>
     public float  SeedClusterCenter { get; set; } = 0.3f;
 
