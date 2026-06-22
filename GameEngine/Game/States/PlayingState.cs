@@ -958,17 +958,208 @@ public sealed class PlayingState : IGameState
         r.DrawLine(p, p + aim * 32f, new Color(170, 205, 255, 160), 2f);
     }
 
+    // ── HUD constants ─────────────────────────────────────────────────────────
+    // HUD-display scale for ship damage widget (body-local coords × this = HUD pixels).
+    private const float HudShipScale = 2.0f;
+    // X-center of ship damage widget.
+    private const float HudShipCX    = 70f;
+    // Y-center of ship damage widget (from screen bottom).
+    private const float HudShipCYOff = 55f;
+    // Where weapon bars start (from left).
+    private const float HudWeapX     = 148f;
+    // Where skill bars start (from right).
+    private const float HudSkillOffX = 195f;
+
+    private static readonly (string Role, string WeapKey, string Label, Color Color)[] WeaponDefs =
+    [
+        ("cannon",   "cannon",   "C", new Color(255, 200, 80)),
+        ("shotgun",  "shotgun",  "S", new Color(255, 140, 60)),
+        ("piercing", "piercing", "P", new Color(180, 120, 255)),
+        ("grenade",  "grenade",  "G", new Color(100, 220, 120)),
+    ];
+    private static readonly (string SkillKey, string Label)[] SkillDefs =
+    [
+        ("dash",   "Q"),
+        ("turbo",  "E"),
+        ("slowmo", "R"),
+    ];
+
     private void DrawHud(IRenderer r)
     {
-        var font = new FontSpec("monospace", 14f);
-        int s = (int)_gameTime;
-        r.DrawText(
-            $"{s / 60:00}:{s % 60:00}   Score {_ctx.Score.Total:F0}   Cells {_ctx.CellBudget.Count}",
-            new Vector2(12, 10), new Color(190, 200, 220), font);
-        r.DrawText(
-            "WASD move   Mouse aim   Click fire   Esc quit",
-            new Vector2(12, _ctx.ScreenH - 22f), new Color(80, 100, 130), font);
+        var font  = new FontSpec("monospace", 13f);
+        var small = new FontSpec("monospace", 11f);
+
+        // ── Top-left: timer + score ───────────────────────────────────────────
+        int elapsed = (int)_gameTime;
+        r.DrawText($"{elapsed / 60:00}:{elapsed % 60:00}   {_ctx.Score.Total:F0} pts",
+            new Vector2(12f, 10f), new Color(190, 200, 220), font);
+
+        if (!_world.IsAlive(_player)) return;
+
+        float bY = _ctx.ScreenH - 10f;  // bottom of HUD bar area
+
+        // ── Ship damage widget ─────────────────────────────────────────────────
+        var shipCenter = new Vector2(HudShipCX, _ctx.ScreenH - HudShipCYOff);
+        DrawShipWidget(r, shipCenter, HudShipScale);
+
+        // ── Weapon cooldown bars ───────────────────────────────────────────────
+        DrawWeaponBars(r, HudWeapX, bY, small);
+
+        // ── Skill cooldown bars ────────────────────────────────────────────────
+        DrawSkillBars(r, _ctx.ScreenW - HudSkillOffX, bY, small);
     }
+
+    private void DrawShipWidget(IRenderer r, Vector2 center, float scale)
+    {
+        if (!_world.HasComponent<FracturableBody>(_player)) return;
+        ref var fb  = ref _world.GetComponent<FracturableBody>(_player);
+        bool[]? pulv = _world.HasComponent<FractureProcess>(_player)
+            ? _world.GetComponent<FractureProcess>(_player).Pulverized : null;
+
+        // Fill alive cells (green).
+        _meshVerts.Clear(); _meshLens.Clear();
+        for (int ci = 0; ci < fb.Cells.Length; ci++)
+        {
+            if (pulv?[ci] == true) continue;
+            var lv = fb.Cells[ci].Local;
+            foreach (var v in lv) _meshVerts.Add(center + v * scale);
+            _meshLens.Add(lv.Length);
+        }
+        if (_meshVerts.Count > 0)
+            r.FillPath(CollectionsMarshal.AsSpan(_meshVerts), CollectionsMarshal.AsSpan(_meshLens),
+                new Color(45, 165, 65, 210));
+
+        // Outlines: alive cells.
+        for (int ci = 0; ci < fb.Cells.Length; ci++)
+        {
+            if (pulv?[ci] == true) continue;
+            var lv = fb.Cells[ci].Local;
+            for (int i = 0; i < lv.Length; i++)
+                r.DrawLine(center + lv[i] * scale, center + lv[(i + 1) % lv.Length] * scale,
+                    new Color(100, 200, 110, 200), 1f);
+        }
+
+        // Ghost outlines for pulverized / absent cells.
+        for (int ci = 0; ci < fb.Cells.Length; ci++)
+        {
+            if (pulv == null || !pulv[ci]) continue;
+            var lv = fb.Cells[ci].Local;
+            for (int i = 0; i < lv.Length; i++)
+                r.DrawLine(center + lv[i] * scale, center + lv[(i + 1) % lv.Length] * scale,
+                    new Color(55, 60, 72, 160), 1f);
+        }
+    }
+
+    private void DrawWeaponBars(IRenderer r, float startX, float bottomY, in FontSpec font)
+    {
+        const float BarW = 38f, BarH = 8f, Gap = 46f;
+
+        bool hasFb  = _world.HasComponent<FracturableBody>(_player);
+        bool hasFp  = hasFb && _world.HasComponent<FractureProcess>(_player);
+        bool[]? pulv = hasFp ? _world.GetComponent<FractureProcess>(_player).Pulverized : null;
+        float cdRem  = _world.HasComponent<ShootCooldown>(_player)
+            ? _world.GetComponent<ShootCooldown>(_player).Remaining : 0f;
+        string actKey = _world.HasComponent<ActiveWeapon>(_player)
+            ? (_world.GetComponent<ActiveWeapon>(_player).Key ?? "") : "";
+
+        float x = startX;
+        foreach (var (role, key, label, col) in WeaponDefs)
+        {
+            bool cellAlive = IsWeaponCellAlive(role, hasFb, pulv);
+            Color textC = cellAlive ? col           : new Color(70, 74, 85);
+            Color bgC   = new Color(22, 25, 32);
+            Color fgC   = cellAlive ? col           : new Color(45, 48, 58);
+
+            r.DrawText(label, new Vector2(x + 1f, bottomY - BarH - 15f), textC, font);
+            FillRect(r, x, bottomY - BarH, BarW, BarH, bgC);
+
+            if (cellAlive)
+            {
+                float fill;
+                if (key == actKey && _ctx.Config.Weapons.TryGetValue(key, out var wCfg))
+                {
+                    float maxCd = 1f / MathF.Max(0.001f, wCfg.FireRate);
+                    fill = BarW * (1f - Math.Clamp(cdRem / maxCd, 0f, 1f));
+                }
+                else fill = BarW;  // other weapons: always show full (Step 7 will add per-weapon cd)
+                if (fill > 0f) FillRect(r, x, bottomY - BarH, fill, BarH, fgC);
+            }
+            x += Gap;
+        }
+    }
+
+    private bool IsWeaponCellAlive(string role, bool hasFb, bool[]? pulv)
+    {
+        if (!hasFb) return false;
+        ref var fb = ref _world.GetComponent<FracturableBody>(_player);
+        for (int i = 0; i < fb.Cells.Length; i++)
+        {
+            if (fb.Cells[i].Role == role)
+                return pulv == null || !pulv[i];
+        }
+        return false;
+    }
+
+    private void DrawSkillBars(IRenderer r, float startX, float bottomY, in FontSpec font)
+    {
+        const float BarW = 52f, BarH = 8f, Gap = 60f;
+
+        bool hasFb  = _world.HasComponent<FracturableBody>(_player);
+        bool hasFp  = hasFb && _world.HasComponent<FractureProcess>(_player);
+        bool[]? pulv = hasFp ? _world.GetComponent<FractureProcess>(_player).Pulverized : null;
+        bool propOk = HasAlivePropeller(hasFb, pulv);
+        SkillState sk = _world.HasComponent<SkillState>(_player)
+            ? _world.GetComponent<SkillState>(_player) : default;
+
+        float x = startX;
+        foreach (var (key, label) in SkillDefs)
+        {
+            bool gate = key == "slowmo" || propOk;
+            if (!_ctx.Config.Skills.TryGetValue(key, out var sc)) { x += Gap; continue; }
+
+            float cdRem = key switch
+            {
+                "dash"   => sk.DashCooldown,
+                "turbo"  => sk.TurboCooldown,
+                "slowmo" => sk.SlowMoCooldown,
+                _        => 0f
+            };
+            float ratio = sc.Cooldown > 0f
+                ? 1f - Math.Clamp(cdRem / sc.Cooldown, 0f, 1f)
+                : 1f;
+
+            Color col   = key switch
+            {
+                "dash"   => new Color(100, 180, 255),
+                "turbo"  => new Color(255, 150, 50),
+                "slowmo" => new Color(180, 100, 255),
+                _        => new Color(160, 170, 185)
+            };
+            Color textC = gate ? col : new Color(70, 74, 85);
+            Color bgC   = new Color(22, 25, 32);
+            Color fgC   = gate ? col : new Color(45, 48, 58);
+
+            r.DrawText(label, new Vector2(x + 1f, bottomY - BarH - 15f), textC, font);
+            FillRect(r, x, bottomY - BarH, BarW, BarH, bgC);
+            float fill = BarW * ratio;
+            if (fill > 0f && gate) FillRect(r, x, bottomY - BarH, fill, BarH, fgC);
+            x += Gap;
+        }
+    }
+
+    private bool HasAlivePropeller(bool hasFb, bool[]? pulv)
+    {
+        if (!hasFb || !_world.IsAlive(_player)) return false;
+        ref var fb = ref _world.GetComponent<FracturableBody>(_player);
+        for (int i = 0; i < fb.Cells.Length; i++)
+            if (fb.Cells[i].Role == "propeller" && (pulv == null || !pulv[i]))
+                return true;
+        return false;
+    }
+
+    private static void FillRect(IRenderer r, float x, float y, float w, float h, Color c)
+        => r.FillPolygon(stackalloc Vector2[]
+            { new(x, y), new(x + w, y), new(x + w, y + h), new(x, y + h) }, c);
 
     // ── VFX ──────────────────────────────────────────────────────────────────
 
