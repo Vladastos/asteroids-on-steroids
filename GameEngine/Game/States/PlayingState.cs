@@ -59,15 +59,18 @@ public sealed class PlayingState : IGameState
 
         var worldCenter = new Vector2(wc.Width / 2f, wc.Height / 2f);
 
+        var pcs = new PlayerControlSystem(ctx, _camera);
+        pcs.OnPiercingFire = SpawnPiercingRound;
         _systems =
         [
             new PreviousStateSystem(),
-            new PlayerControlSystem(ctx, _camera),
+            pcs,
             new PhysicsSystem(),
             new VortexSystem(worldCenter, ctx.Config.Vortex),
             new MovementSystem(),
             new BorderDampSystem(wc.Width, wc.Height),
             new RaycastBulletSystem(_bus, _fx, _rng),
+            new GrenadeSystem(_bus),
             new GhostSystem(),
             new CollisionSystem(new SpatialGrid(160f), _bus) { ResolveOverlap = true, EnableSleeping = false },
             new FractureCrackSystem(_bus, _rng),
@@ -75,7 +78,6 @@ public sealed class PlayingState : IGameState
             new EventFlushSystem(_bus),
             new TimeToLiveSystem(),
             // TODO: AlienAiSystem
-            // TODO: SkillSystem
         ];
     }
 
@@ -88,6 +90,7 @@ public sealed class PlayingState : IGameState
         _bus.Subscribe<CellPulverizedEvent>(OnCellPulverized);
         _bus.Subscribe<FractureCompletedEvent>(OnFractureCompleted);
         _bus.Subscribe<FractureSplitEvent>(OnFractureSplit);
+        _bus.Subscribe<GrenadeDetonateEvent>(OnGrenadeDetonate);
 
         _ctx.CellBudget.Reset();
         _ctx.Score.Reset();
@@ -108,13 +111,23 @@ public sealed class PlayingState : IGameState
 
     public IGameState? Update(double dt)
     {
+        // Slow-mo scales game simulation dt; input is polled before Update so key presses
+        // still happen at wall-clock rate regardless of the scaled dt.
+        double gameDt = dt;
+        if (_world.IsAlive(_player) && _world.HasComponent<SkillState>(_player))
+        {
+            float slowActive = _world.GetComponent<SkillState>(_player).SlowMoActive;
+            if (slowActive > 0f && _ctx.Config.Skills.TryGetValue("slowmo", out var smCfg))
+                gameDt *= smCfg.TimeScale ?? 0.3;
+        }
+
         foreach (var s in _systems)
         {
             if (s is PlayerControlSystem pcs) pcs.Player = _player;
-            s.Update(_world, dt);
+            s.Update(_world, gameDt);
         }
         _world.FlushDeferred();
-        _fx.Update((float)dt);
+        _fx.Update((float)gameDt);
 
         _ctx.Score.Update(dt, _ctx.Config.Scoring.KillChainDecay);
 
@@ -491,7 +504,7 @@ public sealed class PlayingState : IGameState
         _world.AddComponent(_player, new Transform { Position = pos, PreviousPosition = pos });
         _world.AddComponent(_player, new Velocity());
         _world.AddComponent(_player, new AimComponent { Dir = -Vector2.UnitY });
-        _world.AddComponent(_player, new ShootCooldown());
+        _world.AddComponent(_player, new WeaponCooldowns());
         _world.AddComponent(_player, new ActiveWeapon { Key = _ctx.Config.Player.StartingWeapon });
         _world.AddComponent(_player, new SkillState());
         _world.AddComponent(_player, new PlayerTag());
@@ -653,22 +666,22 @@ public sealed class PlayingState : IGameState
         return new FractureGroup { Id = id, FramesLeft = 16 };
     }
 
-    private (AimComponent aim, ShootCooldown cd, ActiveWeapon wep, SkillState sk)
+    private (AimComponent aim, WeaponCooldowns wc, ActiveWeapon wep, SkillState sk)
         SavePlayerState(Entity e)
     {
-        var aim = _world.HasComponent<AimComponent>(e)  ? _world.GetComponent<AimComponent>(e)  : new AimComponent { Dir = -Vector2.UnitY };
-        var cd  = _world.HasComponent<ShootCooldown>(e) ? _world.GetComponent<ShootCooldown>(e) : default;
-        var wep = _world.HasComponent<ActiveWeapon>(e)  ? _world.GetComponent<ActiveWeapon>(e)  : new ActiveWeapon { Key = _ctx.Config.Player.StartingWeapon };
-        var sk  = _world.HasComponent<SkillState>(e)    ? _world.GetComponent<SkillState>(e)    : default;
-        return (aim, cd, wep, sk);
+        var aim = _world.HasComponent<AimComponent>(e)      ? _world.GetComponent<AimComponent>(e)      : new AimComponent { Dir = -Vector2.UnitY };
+        var wc  = _world.HasComponent<WeaponCooldowns>(e)   ? _world.GetComponent<WeaponCooldowns>(e)   : default;
+        var wep = _world.HasComponent<ActiveWeapon>(e)      ? _world.GetComponent<ActiveWeapon>(e)      : new ActiveWeapon { Key = _ctx.Config.Player.StartingWeapon };
+        var sk  = _world.HasComponent<SkillState>(e)        ? _world.GetComponent<SkillState>(e)        : default;
+        return (aim, wc, wep, sk);
     }
 
     private void TransferPlayerToFragment(Entity ne, in FragmentSpec f,
-        AimComponent aim, ShootCooldown cd, ActiveWeapon wep, SkillState sk)
+        AimComponent aim, WeaponCooldowns wc, ActiveWeapon wep, SkillState sk)
     {
         _world.AddComponent(ne, new PlayerTag());
         _world.AddComponent(ne, aim);
-        _world.AddComponent(ne, cd);
+        _world.AddComponent(ne, wc);
         _world.AddComponent(ne, new ActiveWeapon { Key = wep.Key ?? _ctx.Config.Player.StartingWeapon });
         _world.AddComponent(ne, sk);
         _player = ne;
@@ -698,19 +711,96 @@ public sealed class PlayingState : IGameState
 
     // ── Fracture event handlers ───────────────────────────────────────────────
 
+    private void OnGrenadeDetonate(GrenadeDetonateEvent ev)
+    {
+        if (_world.IsAlive(ev.Grenade)) _world.DestroyEntity(ev.Grenade);
+        if (!_ctx.Config.Weapons.TryGetValue(ev.WeaponKey, out var wcfg)) return;
+
+        int   count  = wcfg.ShrapnelCount ?? 12;
+        float spread = (wcfg.ShrapnelSpread ?? 360f) * MathF.PI / 180f;
+        float step   = count > 1 ? spread / count : 0f;
+        float start  = (float)(_rng.NextDouble() * MathF.Tau);
+        float speed  = wcfg.ProjectileSpeed;
+        float energy = (wcfg.EnergyPerRay ?? wcfg.Energy) / MathF.Max(1f, count);
+
+        EmitFlash(ev.WorldPos, energy * count);
+
+        for (int i = 0; i < count; i++)
+        {
+            float angle = start + step * i;
+            Vector2 dir = new(MathF.Cos(angle), MathF.Sin(angle));
+            var b = _world.CreateEntity();
+            _world.AddComponent(b, new Transform { Position = ev.WorldPos, PreviousPosition = ev.WorldPos });
+            _world.AddComponent(b, new Velocity { Linear = dir * speed });
+            _world.AddComponent(b, new BulletTag());
+            _world.AddComponent(b, new BulletVisual { Color = new Color(255, 160, 50) });
+            _world.AddComponent(b, new BulletData { WeaponKey = ev.WeaponKey, Energy = energy });
+            _world.AddComponent(b, new TimeToLive { Remaining = wcfg.TimeToLive });
+        }
+    }
+
+    private void SpawnPiercingRound(Vector2 from, Vector2 aimDir)
+    {
+        if (!_ctx.Config.Weapons.TryGetValue("piercing", out var wcfg)) return;
+        if (!_ctx.Shapes.TryGetValue("piercing_round", out var sd)) return;
+        if (!_ctx.Config.Materials.TryGetValue("metal", out var mc)) mc = _ctx.Config.Materials.Values.First();
+        var mat = mc.ToFractureProperties();
+
+        // Build the piercing round body aligned to aim direction (rotate 90° since shape points up).
+        var outline = sd.Outline.Select(xy => new Vector2(xy[0], xy[1])).ToList();
+        var seedPos = sd.Seeds.Select(s => new Vector2(s.X, s.Y)).ToList();
+        var seedMlt = sd.Seeds.Select(s => s.BondMult).ToList();
+        var body    = VoronoiTessellator.BuildFromExplicitSeeds(outline, seedPos, seedMlt, mat, _rng);
+
+        float rot   = MathF.Atan2(aimDir.Y, aimDir.X) + MathF.PI * 0.5f;
+        Vector2 pos = from + aimDir * 40f;
+        float speed = wcfg.ProjectileSpeed;
+        float clamp = wcfg.LateralImpulseClamp ?? 0.4f;
+
+        var e = SpawnFracturableBody(body, pos, rot, aimDir * speed, 0f,
+            new BodyColor { Fill = new Color(180, 200, 230), Outline = new Color(230, 240, 255) });
+        _world.AddComponent(e, new PiercingRoundTag { Direction = aimDir, LateralClamp = clamp });
+        _world.AddComponent(e, new TimeToLive { Remaining = wcfg.TimeToLive });
+        // Use Bullet layer so it only collides with asteroids and aliens (not the player).
+        if (_world.HasComponent<Collider>(e))
+        {
+            ref var col = ref _world.GetComponent<Collider>(e);
+            col.Layer = GameLayers.Bullet;
+            col.Mask  = GameLayers.Asteroid | GameLayers.Alien;
+        }
+    }
+
+    private bool IsDashInvincible() =>
+        _world.IsAlive(_player) && _world.HasComponent<SkillState>(_player)
+        && _world.GetComponent<SkillState>(_player).DashActive > 0f;
+
     private void OnBulletHit(BulletHitEvent ev)
     {
         if (!_world.IsAlive(ev.Target) || !_world.IsAlive(ev.Bullet)) return;
         Vector2 bulletVel = _world.GetComponent<Velocity>(ev.Bullet).Linear;
         _world.DestroyEntity(ev.Bullet);
 
-        string weaponKey = _world.HasComponent<BulletData>(ev.Bullet)
-            ? _world.GetComponent<BulletData>(ev.Bullet).WeaponKey
-            : _ctx.Config.Player.StartingWeapon;
+        // Dash invincibility — bullet still consumed but no fracture applied to player.
+        if (ev.Target == _player && IsDashInvincible()) return;
+
+        bool hasData  = _world.HasComponent<BulletData>(ev.Bullet);
+        string weaponKey = hasData ? _world.GetComponent<BulletData>(ev.Bullet).WeaponKey
+                                   : _ctx.Config.Player.StartingWeapon;
+        float storedEnergy = hasData ? _world.GetComponent<BulletData>(ev.Bullet).Energy : 0f;
+
+        // Grenade hits detonate instead of fracturing directly.
+        if (hasData && _world.HasComponent<GrenadeFuse>(ev.Bullet))
+        {
+            var fuse = _world.GetComponent<GrenadeFuse>(ev.Bullet);
+            _bus.Publish(new GrenadeDetonateEvent(ev.Bullet, ev.Point, fuse.WeaponKey));
+            return;
+        }
 
         if (!_ctx.Config.Weapons.TryGetValue(weaponKey, out var weaponCfg)) return;
         WeaponProfile profile = weaponCfg.ToWeaponProfile();
-        float bulletMass = weaponCfg.Energy / MathF.Max(1f, bulletVel.LengthSquared()) * 2f;
+        // Use stored per-bullet energy (EnergyPerRay for shotgun, Energy for cannon).
+        float effectiveEnergy = storedEnergy > 0f ? storedEnergy : weaponCfg.Energy;
+        float bulletMass = effectiveEnergy / MathF.Max(1f, bulletVel.LengthSquared()) * 2f;
 
         EmitFlash(ev.Point, 0.5f * bulletMass * bulletVel.LengthSquared());
 
@@ -734,6 +824,39 @@ public sealed class PlayingState : IGameState
         bool aIsBody = _world.HasComponent<FracturableBody>(eA);
         bool bIsBody = _world.HasComponent<FracturableBody>(eB);
         if (!aIsBody || !bIsBody) return;
+
+        // Piercing round: use weapon profile for the target, lateral-clamp the round.
+        Entity piercing = _world.HasComponent<PiercingRoundTag>(eA) ? eA
+                        : _world.HasComponent<PiercingRoundTag>(eB) ? eB
+                        : default;
+        if (_world.IsAlive(piercing))
+        {
+            Entity target = piercing == eA ? eB : eA;
+            if (_world.IsAlive(target) && _world.HasComponent<FracturableBody>(target))
+            {
+                var pt = _world.GetComponent<PiercingRoundTag>(piercing);
+                if (!_ctx.Config.Weapons.TryGetValue("piercing", out var pcfg)) return;
+                WeaponProfile pProfile = pcfg.ToWeaponProfile();
+                float pMass = pcfg.Mass ?? 3f;
+                Vector2 pVel = _world.HasComponent<Velocity>(piercing)
+                    ? _world.GetComponent<Velocity>(piercing).Linear : Vector2.Zero;
+                float adjMass = target == _player ? pMass * _ctx.Config.Player.PlayerImpactCoeff : pMass;
+                FractureService.BeginFracture(_world, target, -1, ev.Contact.ContactPoint,
+                    pt.Direction, pVel, adjMass, pProfile, FractureTiming.Default, _rng);
+                // Clamp lateral velocity on the round to keep it on-axis.
+                if (_world.HasComponent<Velocity>(piercing))
+                {
+                    ref var pv = ref _world.GetComponent<Velocity>(piercing);
+                    float fwdComp = Vector2.Dot(pv.Linear, pt.Direction);
+                    Vector2 lat = pv.Linear - pt.Direction * fwdComp;
+                    float latLen = lat.Length();
+                    float maxLat = pt.LateralClamp * MathF.Abs(fwdComp);
+                    if (latLen > maxLat && latLen > 1e-4f)
+                        pv.Linear = pt.Direction * fwdComp + lat / latLen * maxLat;
+                }
+            }
+            return;
+        }
 
         var pair = eA.Id < eB.Id ? (eA.Id, eB.Id) : (eB.Id, eA.Id);
         if (_activeCollisions.Contains(pair)) return;
@@ -773,10 +896,13 @@ public sealed class PlayingState : IGameState
         float massBForA = eA == _player ? mB * impCoeff : mB;
         float massAForB = eB == _player ? mA * impCoeff : mA;
 
-        FractureService.BeginFracture(_world, eA, -1, cp, dirAB,
-            vRel + vA.Linear, massBForA, weapon, FractureTiming.Default, _rng);
-        FractureService.BeginFracture(_world, eB, -1, cp, -dirAB,
-            -vRel + vB.Linear, massAForB, weapon, FractureTiming.Default, _rng);
+        bool dashInv = IsDashInvincible();
+        if (!(eA == _player && dashInv))
+            FractureService.BeginFracture(_world, eA, -1, cp, dirAB,
+                vRel + vA.Linear, massBForA, weapon, FractureTiming.Default, _rng);
+        if (!(eB == _player && dashInv))
+            FractureService.BeginFracture(_world, eB, -1, cp, -dirAB,
+                -vRel + vB.Linear, massAForB, weapon, FractureTiming.Default, _rng);
     }
 
     private void OnCellPulverized(CellPulverizedEvent ev)
@@ -817,7 +943,7 @@ public sealed class PlayingState : IGameState
         _activeCollisions.RemoveWhere(p => p.Item1 == ev.Body.Id || p.Item2 == ev.Body.Id);
         bool isPlayer = ev.Body == _player;
         BodyColor color = GetBodyColor(ev.Body);
-        var (savedAim, savedCd, savedWep, savedSk) = isPlayer ? SavePlayerState(ev.Body) : default;
+        var (savedAim, savedWc, savedWep, savedSk) = isPlayer ? SavePlayerState(ev.Body) : default;
         var fg = MakeFractureGroup(ev.Body);
         bool cockpitFound = false;
 
@@ -830,7 +956,7 @@ public sealed class PlayingState : IGameState
             if (isPlayer && !cockpitFound && f.Body.Cells.Any(c => c.Role == "cockpit"))
             {
                 cockpitFound = true;
-                TransferPlayerToFragment(ne, f, savedAim, savedCd, savedWep, savedSk);
+                TransferPlayerToFragment(ne, f, savedAim, savedWc, savedWep, savedSk);
             }
         }
         _world.DestroyEntity(ev.Body);
@@ -846,7 +972,7 @@ public sealed class PlayingState : IGameState
         _activeCollisions.RemoveWhere(p => p.Item1 == ev.Body.Id || p.Item2 == ev.Body.Id);
         bool isPlayer = ev.Body == _player;
         BodyColor color = GetBodyColor(ev.Body);
-        var (savedAim, savedCd, savedWep, savedSk) = isPlayer ? SavePlayerState(ev.Body) : default;
+        var (savedAim, savedWc, savedWep, savedSk) = isPlayer ? SavePlayerState(ev.Body) : default;
         var fg = MakeFractureGroup(ev.Body);
         bool cockpitFound = false;
 
@@ -861,7 +987,7 @@ public sealed class PlayingState : IGameState
             if (isPlayer && !cockpitFound && f.Body.Cells.Any(c => c.Role == "cockpit"))
             {
                 cockpitFound = true;
-                TransferPlayerToFragment(ne, f, savedAim, savedCd, savedWep, savedSk);
+                TransferPlayerToFragment(ne, f, savedAim, savedWc, savedWep, savedSk);
             }
         }
         _world.DestroyEntity(ev.Body);
@@ -1057,10 +1183,8 @@ public sealed class PlayingState : IGameState
         bool hasFb  = _world.HasComponent<FracturableBody>(_player);
         bool hasFp  = hasFb && _world.HasComponent<FractureProcess>(_player);
         bool[]? pulv = hasFp ? _world.GetComponent<FractureProcess>(_player).Pulverized : null;
-        float cdRem  = _world.HasComponent<ShootCooldown>(_player)
-            ? _world.GetComponent<ShootCooldown>(_player).Remaining : 0f;
-        string actKey = _world.HasComponent<ActiveWeapon>(_player)
-            ? (_world.GetComponent<ActiveWeapon>(_player).Key ?? "") : "";
+        WeaponCooldowns wcd = _world.HasComponent<WeaponCooldowns>(_player)
+            ? _world.GetComponent<WeaponCooldowns>(_player) : default;
 
         float x = startX;
         foreach (var (role, key, label, col) in WeaponDefs)
@@ -1075,13 +1199,20 @@ public sealed class PlayingState : IGameState
 
             if (cellAlive)
             {
-                float fill;
-                if (key == actKey && _ctx.Config.Weapons.TryGetValue(key, out var wCfg))
+                float cdRem = key switch
+                {
+                    "cannon"   => wcd.Cannon,
+                    "shotgun"  => wcd.Shotgun,
+                    "piercing" => wcd.Piercing,
+                    "grenade"  => wcd.Grenade,
+                    _          => 0f
+                };
+                float fill = BarW;
+                if (_ctx.Config.Weapons.TryGetValue(key, out var wCfg))
                 {
                     float maxCd = 1f / MathF.Max(0.001f, wCfg.FireRate);
                     fill = BarW * (1f - Math.Clamp(cdRem / maxCd, 0f, 1f));
                 }
-                else fill = BarW;  // other weapons: always show full (Step 7 will add per-weapon cd)
                 if (fill > 0f) FillRect(r, x, bottomY - BarH, fill, BarH, fgC);
             }
             x += Gap;
@@ -1376,6 +1507,7 @@ sealed class PlayerControlSystem : ISystem
     private readonly GameContext _ctx;
     private readonly Camera      _camera;
     public Entity Player { get; set; }
+    public Action<Vector2, Vector2>? OnPiercingFire { get; set; }
 
     public PlayerControlSystem(GameContext ctx, Camera camera) { _ctx = ctx; _camera = camera; }
 
@@ -1405,42 +1537,162 @@ sealed class PlayerControlSystem : ISystem
 
         ref var t   = ref world.GetComponent<Transform>(Player);
         ref var aim = ref world.GetComponent<AimComponent>(Player);
-        ref var cd  = ref world.GetComponent<ShootCooldown>(Player);
-        ref var wep = ref world.GetComponent<ActiveWeapon>(Player);
+        ref var wcd = ref world.GetComponent<WeaponCooldowns>(Player);
+        ref var sk  = ref world.GetComponent<SkillState>(Player);
 
-        // Movement — thrust degraded by propeller cell survival.
+        var inp    = _ctx.Input;
+        var skills = _ctx.Config.Skills;
+        float fdt  = (float)dt;
+
+        // ── Skill cooldown and active-duration ticking ────────────────────────
+        if (sk.DashCooldown  > 0f) sk.DashCooldown  = MathF.Max(0f, sk.DashCooldown  - fdt);
+        if (sk.TurboCooldown > 0f) sk.TurboCooldown = MathF.Max(0f, sk.TurboCooldown - fdt);
+        if (sk.SlowMoCooldown > 0f) sk.SlowMoCooldown = MathF.Max(0f, sk.SlowMoCooldown - fdt);
+        if (sk.DashActive  > 0f) sk.DashActive  = MathF.Max(0f, sk.DashActive  - fdt);
+        if (sk.TurboActive > 0f) sk.TurboActive = MathF.Max(0f, sk.TurboActive - fdt);
+        if (sk.SlowMoActive > 0f) sk.SlowMoActive = MathF.Max(0f, sk.SlowMoActive - fdt);
+
+        bool hasProp = HasAlivePropeller(world);
+
+        // ── Dash (Q) ─────────────────────────────────────────────────────────
+        if (inp.IsPressed(KeyCode.Q) && hasProp && sk.DashCooldown <= 0f
+            && skills.TryGetValue("dash", out var dashCfg))
+        {
+            ref var vel = ref world.GetComponent<Velocity>(Player);
+            vel.Linear += aim.Dir * (dashCfg.VelocitySpike ?? 1400f);
+            sk.DashActive   = dashCfg.InvincibilityTime ?? 0.35f;
+            sk.DashCooldown = dashCfg.Cooldown;
+        }
+
+        // ── Turbo (E) ─────────────────────────────────────────────────────────
+        if (inp.IsPressed(KeyCode.E) && hasProp && sk.TurboCooldown <= 0f
+            && skills.TryGetValue("turbo", out var turboCfgAct))
+        {
+            sk.TurboActive   = turboCfgAct.Duration;
+            sk.TurboCooldown = turboCfgAct.Cooldown;
+        }
+
+        // ── Slow-Mo (R) ───────────────────────────────────────────────────────
+        if (inp.IsPressed(KeyCode.R) && sk.SlowMoCooldown <= 0f
+            && skills.TryGetValue("slowmo", out var slowCfgAct))
+        {
+            sk.SlowMoActive   = slowCfgAct.Duration;
+            sk.SlowMoCooldown = slowCfgAct.Cooldown;
+        }
+
+        // ── Movement — thrust degraded by propeller survival ──────────────────
         float thrustMult = ComputeThrustMult(world);
         Vector2 a = Vector2.Zero;
-        var inp = _ctx.Input;
         if (inp.IsHeld(KeyCode.W)) a.Y -= 1; if (inp.IsHeld(KeyCode.S)) a.Y += 1;
         if (inp.IsHeld(KeyCode.A)) a.X -= 1; if (inp.IsHeld(KeyCode.D)) a.X += 1;
         if (a != Vector2.Zero && thrustMult > 0f)
         {
-            float thrust = _ctx.Config.Player.Thrust * thrustMult;
+            float turboMult = (sk.TurboActive > 0f && skills.TryGetValue("turbo", out var tc))
+                ? (tc.ThrustMult ?? 3f) : 1f;
+            float slowBoost = (sk.SlowMoActive > 0f && skills.TryGetValue("slowmo", out var smc))
+                ? (smc.PlayerSpeedBoost ?? 1f) : 1f;
+            float thrust = _ctx.Config.Player.Thrust * thrustMult * turboMult * slowBoost;
             PhysicsSystem.ApplyForce(world, Player, Vector2.Normalize(a) * thrust);
         }
 
-        // Aim toward mouse — convert screen position to world position via camera.
+        // ── Aim toward mouse ──────────────────────────────────────────────────
         Vector2 mouseWorld = _camera.ScreenToWorld(inp.MouseScreen);
         Vector2 toMouse    = mouseWorld - t.Position;
         if (toMouse.LengthSquared() > 1f) aim.Dir = Vector2.Normalize(toMouse);
 
-        // Shoot
-        if (cd.Remaining > 0f) cd.Remaining -= (float)dt;
-        if (inp.IsMouseLeft && cd.Remaining <= 0f && _ctx.Config.Weapons.TryGetValue(wep.Key, out var wcfg))
+        // ── Weapon cooldown ticking ───────────────────────────────────────────
+        if (wcd.Cannon   > 0f) wcd.Cannon   = MathF.Max(0f, wcd.Cannon   - fdt);
+        if (wcd.Shotgun  > 0f) wcd.Shotgun  = MathF.Max(0f, wcd.Shotgun  - fdt);
+        if (wcd.Piercing > 0f) wcd.Piercing = MathF.Max(0f, wcd.Piercing - fdt);
+        if (wcd.Grenade  > 0f) wcd.Grenade  = MathF.Max(0f, wcd.Grenade  - fdt);
+
+        Vector2 muzzle = t.Position + aim.Dir * 24f;
+
+        // ── Cannon (left-click) ───────────────────────────────────────────────
+        if (inp.IsMouseLeft && wcd.Cannon <= 0f && IsWeaponCellAlive("cannon", world)
+            && _ctx.Config.Weapons.TryGetValue("cannon", out var ccfg))
         {
-            cd.Remaining = 1f / wcfg.FireRate;
-            Vector2 muzzle = t.Position + aim.Dir * 24f;
+            wcd.Cannon = 1f / MathF.Max(0.001f, ccfg.FireRate);
             var b = world.CreateEntity();
             world.AddComponent(b, new Transform { Position = muzzle, PreviousPosition = muzzle });
-            world.AddComponent(b, new Velocity { Linear = aim.Dir * wcfg.ProjectileSpeed });
+            world.AddComponent(b, new Velocity { Linear = aim.Dir * ccfg.ProjectileSpeed });
             world.AddComponent(b, new BulletTag());
             world.AddComponent(b, new BulletVisual { Color = new Color(255, 230, 90) });
-            world.AddComponent(b, new BulletData { WeaponKey = wep.Key, Energy = wcfg.Energy });
-            world.AddComponent(b, new TimeToLive { Remaining = wcfg.TimeToLive });
+            world.AddComponent(b, new BulletData { WeaponKey = "cannon", Energy = ccfg.Energy });
+            world.AddComponent(b, new TimeToLive { Remaining = ccfg.TimeToLive });
         }
 
-        // TODO: skill activation (Q = dash, E = turbo, R = slow-mo)
+        // ── Shotgun (right-click) ─────────────────────────────────────────────
+        if (inp.IsMouseRight && wcd.Shotgun <= 0f && IsWeaponCellAlive("shotgun", world)
+            && _ctx.Config.Weapons.TryGetValue("shotgun", out var scfg))
+        {
+            wcd.Shotgun = 1f / MathF.Max(0.001f, scfg.FireRate);
+            int rays  = scfg.Rays ?? 7;
+            float half = (scfg.ConeAngle ?? 18f) * 0.5f * MathF.PI / 180f;
+            float step = rays > 1 ? half * 2f / (rays - 1) : 0f;
+            float baseA = MathF.Atan2(aim.Dir.Y, aim.Dir.X) - half;
+            float rayE  = scfg.EnergyPerRay ?? scfg.Energy / MathF.Max(1f, rays);
+            for (int i = 0; i < rays; i++)
+            {
+                float ang = baseA + step * i;
+                Vector2 d = new(MathF.Cos(ang), MathF.Sin(ang));
+                var b = world.CreateEntity();
+                world.AddComponent(b, new Transform { Position = muzzle, PreviousPosition = muzzle });
+                world.AddComponent(b, new Velocity { Linear = d * scfg.ProjectileSpeed });
+                world.AddComponent(b, new BulletTag());
+                world.AddComponent(b, new BulletVisual { Color = new Color(255, 160, 80) });
+                world.AddComponent(b, new BulletData { WeaponKey = "shotgun", Energy = rayE });
+                world.AddComponent(b, new TimeToLive { Remaining = scfg.TimeToLive });
+            }
+        }
+
+        // ── Piercing (G key) ─────────────────────────────────────────────────
+        if (inp.IsPressed(KeyCode.G) && wcd.Piercing <= 0f && IsWeaponCellAlive("piercing", world)
+            && _ctx.Config.Weapons.TryGetValue("piercing", out var pcfg))
+        {
+            wcd.Piercing = 1f / MathF.Max(0.001f, pcfg.FireRate);
+            OnPiercingFire?.Invoke(muzzle, aim.Dir);
+        }
+
+        // ── Grenade (F key) ───────────────────────────────────────────────────
+        if (inp.IsPressed(KeyCode.F) && wcd.Grenade <= 0f && IsWeaponCellAlive("grenade", world)
+            && _ctx.Config.Weapons.TryGetValue("grenade", out var gcfg))
+        {
+            wcd.Grenade = 1f / MathF.Max(0.001f, gcfg.FireRate);
+            Vector2 gPos = muzzle;
+            var b = world.CreateEntity();
+            world.AddComponent(b, new Transform { Position = gPos, PreviousPosition = gPos });
+            world.AddComponent(b, new Velocity { Linear = aim.Dir * gcfg.ProjectileSpeed });
+            world.AddComponent(b, new RigidBody { Mass = 0.5f, Inertia = 0f, LinearDrag = 1.8f, AngularDrag = 0f, Restitution = 0f, Friction = 0f });
+            world.AddComponent(b, new BulletTag());
+            world.AddComponent(b, new BulletVisual { Color = new Color(100, 255, 100) });
+            world.AddComponent(b, new BulletData { WeaponKey = "grenade", Energy = 0f });
+            world.AddComponent(b, new GrenadeFuse { Remaining = gcfg.FuseTime ?? 1.8f, WeaponKey = "grenade" });
+        }
+    }
+
+    private bool HasAlivePropeller(World world)
+    {
+        if (!world.HasComponent<FracturableBody>(Player)) return false;
+        ref var fb = ref world.GetComponent<FracturableBody>(Player);
+        bool[]? pulv = world.HasComponent<FractureProcess>(Player)
+            ? world.GetComponent<FractureProcess>(Player).Pulverized : null;
+        for (int i = 0; i < fb.Cells.Length; i++)
+            if (fb.Cells[i].Role == "propeller" && (pulv == null || !pulv[i]))
+                return true;
+        return false;
+    }
+
+    private bool IsWeaponCellAlive(string role, World world)
+    {
+        if (!world.HasComponent<FracturableBody>(Player)) return false;
+        ref var fb = ref world.GetComponent<FracturableBody>(Player);
+        bool[]? pulv = world.HasComponent<FractureProcess>(Player)
+            ? world.GetComponent<FractureProcess>(Player).Pulverized : null;
+        for (int i = 0; i < fb.Cells.Length; i++)
+            if (fb.Cells[i].Role == role && (pulv == null || !pulv[i]))
+                return true;
+        return false;
     }
 }
 
@@ -1622,6 +1874,23 @@ sealed class RaycastBulletSystem : ISystem
     }
 }
 
+sealed class GrenadeSystem : ISystem
+{
+    private readonly EventBus _bus;
+    public GrenadeSystem(EventBus bus) { _bus = bus; }
+
+    public void Update(World world, double dt)
+    {
+        world.ForEach<Transform, GrenadeFuse>((Entity e, ref Transform t, ref GrenadeFuse f) =>
+        {
+            if (f.Remaining <= 0f) return;
+            f.Remaining -= (float)dt;
+            if (f.Remaining <= 0f)
+                _bus.Publish(new GrenadeDetonateEvent(e, t.Position, f.WeaponKey));
+        });
+    }
+}
+
 // ── Game events ───────────────────────────────────────────────────────────────
 
 readonly struct BulletHitEvent
@@ -1631,4 +1900,13 @@ readonly struct BulletHitEvent
     public readonly Vector2 Point, ShotDir;
     public BulletHitEvent(Entity target, Entity bullet, int cell, Vector2 point, Vector2 shotDir)
     { Target = target; Bullet = bullet; StruckCell = cell; Point = point; ShotDir = shotDir; }
+}
+
+readonly struct GrenadeDetonateEvent
+{
+    public readonly Entity  Grenade;
+    public readonly Vector2 WorldPos;
+    public readonly string  WeaponKey;
+    public GrenadeDetonateEvent(Entity g, Vector2 pos, string key)
+    { Grenade = g; WorldPos = pos; WeaponKey = key; }
 }

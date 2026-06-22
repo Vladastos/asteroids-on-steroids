@@ -13,6 +13,21 @@ public struct BodyColor { public Color Fill, Outline; }
 /// <summary>Active weapon key (indexes GameConfig.Weapons).</summary>
 public struct ActiveWeapon { public string Key; }
 
+/// <summary>Per-weapon fire cooldown timers (remaining seconds per weapon type).</summary>
+public struct WeaponCooldowns
+{
+    public float Cannon;
+    public float Shotgun;
+    public float Piercing;
+    public float Grenade;
+}
+
+/// <summary>Grenade projectile — detonates on impact or when Remaining reaches 0.</summary>
+public struct GrenadeFuse { public float Remaining; public string WeaponKey; }
+
+/// <summary>Marker on piercing round bodies. Carries aim direction for lateral clamp.</summary>
+public struct PiercingRoundTag { public Vector2 Direction; public float LateralClamp; }
+
 /// <summary>Cooldown state for all three player skills.</summary>
 public struct SkillState
 {
