@@ -117,7 +117,7 @@
     {
       "x": -20,
       "y": -30,
-      "role": "cannon",
+      "role": "shotgun",
       "bondMult": 2
     },
     {
@@ -139,6 +139,18 @@
       "x": -40,
       "y": 10,
       "role": "generic"
+    },
+    {
+      "x": 55,
+      "y": 50,
+      "role": "piercing",
+      "bondMult": 2
+    },
+    {
+      "x": -55,
+      "y": 50,
+      "role": "grenade",
+      "bondMult": 2
     }
   ]
 }

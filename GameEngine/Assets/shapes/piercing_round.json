@@ -1,0 +1,32 @@
+{
+  "name": "PiercingRound",
+  "material": "metal",
+  "outline": [
+    [0, -35],
+    [7, -15],
+    [7, 25],
+    [0, 35],
+    [-7, 25],
+    [-7, -15]
+  ],
+  "seeds": [
+    {
+      "x": 0,
+      "y": -20,
+      "role": "generic",
+      "bondMult": 2.5
+    },
+    {
+      "x": 0,
+      "y": 2,
+      "role": "generic",
+      "bondMult": 2.5
+    },
+    {
+      "x": 0,
+      "y": 22,
+      "role": "generic",
+      "bondMult": 2.5
+    }
+  ]
+}

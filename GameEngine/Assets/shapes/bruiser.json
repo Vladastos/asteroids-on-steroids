@@ -177,6 +177,11 @@
       "role": "bumper",
       "bondMult": 3.6,
       "blastResist": 0.41
+    },
+    {
+      "x": 0,
+      "y": -55,
+      "role": "shotgun"
     }
   ]
 }

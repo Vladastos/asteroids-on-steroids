@@ -1,0 +1,173 @@
+{
+  "name": "Mothership",
+  "material": "metal",
+  "outline": [
+    [0, -200],
+    [-40, -150],
+    [-150, -90],
+    [-200, 0],
+    [-150, 90],
+    [-80, 140],
+    [0, 160],
+    [80, 140],
+    [150, 90],
+    [200, 0],
+    [150, -90],
+    [40, -150]
+  ],
+  "seeds": [
+    {
+      "x": 0,
+      "y": -50,
+      "role": "cockpit",
+      "bondMult": 5,
+      "blastResist": 0.45,
+      "densityMult": 2
+    },
+    {
+      "x": -130,
+      "y": 0,
+      "role": "cockpit",
+      "bondMult": 5,
+      "blastResist": 0.45,
+      "densityMult": 2
+    },
+    {
+      "x": 130,
+      "y": 0,
+      "role": "cockpit",
+      "bondMult": 5,
+      "blastResist": 0.45,
+      "densityMult": 2
+    },
+    {
+      "x": -170,
+      "y": 0,
+      "role": "spawner",
+      "bondMult": 2
+    },
+    {
+      "x": 170,
+      "y": 0,
+      "role": "spawner",
+      "bondMult": 2
+    },
+    {
+      "x": -60,
+      "y": -110,
+      "role": "spawner",
+      "bondMult": 2
+    },
+    {
+      "x": 60,
+      "y": -110,
+      "role": "spawner",
+      "bondMult": 2
+    },
+    {
+      "x": -90,
+      "y": -60,
+      "role": "bumper",
+      "bondMult": 3.5,
+      "blastResist": 0.45
+    },
+    {
+      "x": 90,
+      "y": -60,
+      "role": "bumper",
+      "bondMult": 3.5,
+      "blastResist": 0.45
+    },
+    {
+      "x": -150,
+      "y": -40,
+      "role": "bumper",
+      "bondMult": 3.5,
+      "blastResist": 0.45
+    },
+    {
+      "x": 150,
+      "y": -40,
+      "role": "bumper",
+      "bondMult": 3.5,
+      "blastResist": 0.45
+    },
+    {
+      "x": -150,
+      "y": 40,
+      "role": "bumper",
+      "bondMult": 3.5,
+      "blastResist": 0.45
+    },
+    {
+      "x": 150,
+      "y": 40,
+      "role": "bumper",
+      "bondMult": 3.5,
+      "blastResist": 0.45
+    },
+    {
+      "x": -80,
+      "y": 100,
+      "role": "bumper",
+      "bondMult": 3.5,
+      "blastResist": 0.45
+    },
+    {
+      "x": 80,
+      "y": 100,
+      "role": "bumper",
+      "bondMult": 3.5,
+      "blastResist": 0.45
+    },
+    {
+      "x": 0,
+      "y": -130,
+      "role": "bumper",
+      "bondMult": 3.5,
+      "blastResist": 0.45
+    },
+    {
+      "x": 0,
+      "y": 120,
+      "role": "bumper",
+      "bondMult": 3.5,
+      "blastResist": 0.45
+    },
+    {
+      "x": 0,
+      "y": -20,
+      "role": "generic"
+    },
+    {
+      "x": -70,
+      "y": -30,
+      "role": "generic"
+    },
+    {
+      "x": 70,
+      "y": -30,
+      "role": "generic"
+    },
+    {
+      "x": -70,
+      "y": 40,
+      "role": "generic"
+    },
+    {
+      "x": 70,
+      "y": 40,
+      "role": "generic"
+    },
+    {
+      "x": -40,
+      "y": 90,
+      "role": "generic"
+    },
+    {
+      "x": 40,
+      "y": 90,
+      "role": "generic"
+    }
+  ]
+}
