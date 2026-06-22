@@ -158,8 +158,15 @@
       "steeringWeights": {
         "separation": 1.2,
         "pursuit": 0.8,
-        "avoidance": 1
-      }
+        "avoidance": 1.0
+      },
+      "thrust": 680,
+      "shootCooldown": 2.0,
+      "lateralThrustPenaltyMult": 0.5,
+      "alienImpactCoeff": 1.0,
+      "shapeScale": 0.28,
+      "baseCost": 15,
+      "cellCount": 19
     },
     "bruiser": {
       "shape": "bruiser",
@@ -170,7 +177,14 @@
         "separation": 0.6,
         "pursuit": 1.4,
         "avoidance": 0.5
-      }
+      },
+      "thrust": 900,
+      "shootCooldown": 3.0,
+      "lateralThrustPenaltyMult": 0.3,
+      "alienImpactCoeff": 1.0,
+      "shapeScale": 0.45,
+      "baseCost": 30,
+      "cellCount": 19
     },
     "mothership": {
       "shape": "mothership",
@@ -181,7 +195,14 @@
         "separation": 0.3,
         "pursuit": 0.6,
         "avoidance": 0.4
-      }
+      },
+      "thrust": 400,
+      "shootCooldown": 999,
+      "lateralThrustPenaltyMult": 0.15,
+      "alienImpactCoeff": 0.5,
+      "shapeScale": 1.0,
+      "baseCost": 100,
+      "cellCount": 20
     }
   },
   "asteroids": {

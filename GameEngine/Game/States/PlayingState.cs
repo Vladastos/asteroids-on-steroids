@@ -65,6 +65,7 @@ public sealed class PlayingState : IGameState
         [
             new PreviousStateSystem(),
             pcs,
+            new AlienAiSystem(ctx, _bus, _rng),
             new PhysicsSystem(),
             new VortexSystem(worldCenter, ctx.Config.Vortex),
             new MovementSystem(),
@@ -77,7 +78,6 @@ public sealed class PlayingState : IGameState
             new FractureGroupSystem(),
             new EventFlushSystem(_bus),
             new TimeToLiveSystem(),
-            // TODO: AlienAiSystem
         ];
     }
 
@@ -216,32 +216,55 @@ public sealed class PlayingState : IGameState
         if (cellCap < 3f) return;
 
         // Evaluate time-parametric bias weights for this moment in the game.
-        var bias = new Dictionary<string, float>();
+        var asteroidBias = new Dictionary<string, float>();
+        var alienBias    = new Dictionary<string, float>();
         foreach (var (key, entry) in ws.SpawnBias)
         {
             float t01 = entry.T1 > entry.T0
                 ? Math.Clamp((_gameTime - entry.T0) / (entry.T1 - entry.T0), 0f, 1f)
                 : (_gameTime >= entry.T0 ? 1f : 0f);
             float w = entry.W0 + (entry.W1 - entry.W0) * t01;
-            // Only include asteroid keys here; alien keys are handled in Step 8.
-            if (w > 0f && _ctx.Config.Asteroids.ContainsKey(key))
-                bias[key] = w;
+            if (w <= 0f) continue;
+            if (_ctx.Config.Asteroids.ContainsKey(key))  asteroidBias[key] = w;
+            else if (_ctx.Config.Entities.ContainsKey(key)) alienBias[key]  = w;
         }
 
-        var spawns = ChooseAsteroids(budget, bias, sizeBias, cellCap);
+        var asteroidSpawns = ChooseAsteroids(budget, asteroidBias, sizeBias, cellCap);
+
+        // Alien budget allocation: sample one alien per wave from alien bias if any are unlocked.
+        var alienSpawns = new List<string>();
+        if (alienBias.Count > 0)
+        {
+            float total = alienBias.Values.Sum();
+            float pick  = (float)_rng.NextDouble() * total;
+            float cum   = 0f;
+            string chosen = alienBias.Keys.First();
+            foreach (var (k, w) in alienBias) { cum += w; if (pick <= cum) { chosen = k; break; } }
+            if (_ctx.Config.Entities.TryGetValue(chosen, out var ecfg))
+            {
+                int alienCount = Math.Clamp((int)(budget / MathF.Max(1f, ecfg.BaseCost)), 1, 3);
+                for (int i = 0; i < alienCount; i++) alienSpawns.Add(chosen);
+            }
+        }
 
         Vector2 playerPos = _world.IsAlive(_player) && _world.HasComponent<Transform>(_player)
             ? _world.GetComponent<Transform>(_player).Position
             : new Vector2(wc.Width / 2f, wc.Height / 2f);
 
         var placed = new List<(Vector2 pos, float r)>();
-        foreach (var (key, sizeMult) in spawns)
+        foreach (var (key, sizeMult) in asteroidSpawns)
         {
             float r = _ctx.Config.Asteroids.TryGetValue(key, out var ac) && ac.Procedural != null
                 ? ac.Procedural.BaseRadius * sizeMult : 80f * sizeMult;
             Vector2 pos = FindSpawnPosition(r, placed, playerPos);
             placed.Add((pos, r));
             SpawnAsteroid(pos, key, sizeMult);
+        }
+        foreach (var key in alienSpawns)
+        {
+            Vector2 pos = FindSpawnPosition(80f, placed, playerPos);
+            placed.Add((pos, 80f));
+            SpawnAlien(pos, key);
         }
     }
 
@@ -367,6 +390,44 @@ public sealed class PlayingState : IGameState
                     MaterialColor(ac.Material));
         _world.AddComponent(e, new AsteroidTag());
         _world.AddComponent(e, new AsteroidVariant { Key = typeKey });
+        _ctx.CellBudget.Add(body.Cells.Length);
+    }
+
+    private void SpawnAlien(Vector2 pos, string typeKey)
+    {
+        if (!_ctx.Config.Entities.TryGetValue(typeKey, out var ec)) return;
+        if (!_ctx.Shapes.TryGetValue(ec.Shape, out var sd)) return;
+        if (!_ctx.Config.Materials.TryGetValue(ec.Material, out var mc))
+            mc = _ctx.Config.Materials.Values.First();
+        var mat = mc.ToFractureProperties();
+
+        float sc      = ec.ShapeScale;
+        var outline   = sd.Outline.Select(xy => new Vector2(xy[0] * sc, xy[1] * sc)).ToList();
+        var seedPos   = sd.Seeds.Select(s => new Vector2(s.X * sc, s.Y * sc)).ToList();
+        var seedMult  = sd.Seeds.Select(s => s.BondMult).ToList();
+        var body      = VoronoiTessellator.BuildFromExplicitSeeds(outline, seedPos, seedMult, mat, _rng);
+        ApplyShapeSeeds(body, sd.Seeds, sc);
+
+        var wc = _ctx.Config.World;
+        Vector2 worldCenter = new(wc.Width / 2f, wc.Height / 2f);
+        Vector2 toCenter    = worldCenter - pos;
+        float baseAngle     = MathF.Atan2(toCenter.Y, toCenter.X);
+        float spread        = ((float)_rng.NextDouble() * 2f - 1f) * (MathF.PI / 6f);
+        float speed         = ec.Speed * (0.7f + 0.6f * (float)_rng.NextDouble());
+        Vector2 vel         = new Vector2(MathF.Cos(baseAngle + spread), MathF.Sin(baseAngle + spread)) * speed;
+
+        var color = new BodyColor { Fill = new Color(80, 50, 120), Outline = new Color(160, 100, 220) };
+        var e     = SpawnFracturableBody(body, pos, (float)(_rng.NextDouble() * MathF.Tau), vel, 0f, color);
+        _world.AddComponent(e, new AlienTag());
+        _world.AddComponent(e, new AlienVariant { Key = typeKey });
+        _world.AddComponent(e, new ShootCooldown { Remaining = (float)_rng.NextDouble() * ec.ShootCooldown });
+        // Set alien layer so player bullets can target aliens but not other asteroids for aliens.
+        if (_world.HasComponent<Collider>(e))
+        {
+            ref var col = ref _world.GetComponent<Collider>(e);
+            col.Layer = GameLayers.Alien;
+            col.Mask  = GameLayers.Asteroid | GameLayers.Player | GameLayers.Alien;
+        }
         _ctx.CellBudget.Add(body.Cells.Length);
     }
 
@@ -804,10 +865,17 @@ public sealed class PlayingState : IGameState
 
         EmitFlash(ev.Point, 0.5f * bulletMass * bulletVel.LengthSquared());
 
-        // Player ship absorbs reduced fracture energy.
-        float adjMass = ev.Target == _player
-            ? bulletMass * _ctx.Config.Player.PlayerImpactCoeff
-            : bulletMass;
+        // Scale fracture energy by target's impact coefficient.
+        float adjMass = bulletMass;
+        if (ev.Target == _player)
+            adjMass = bulletMass * _ctx.Config.Player.PlayerImpactCoeff;
+        else if (_world.HasComponent<AlienVariant>(ev.Target))
+        {
+            string varKey = _world.GetComponent<AlienVariant>(ev.Target).Key;
+            float coeff = _ctx.Config.Entities.TryGetValue(varKey, out var ecfg)
+                ? ecfg.AlienImpactCoeff : 1f;
+            adjMass = bulletMass * coeff;
+        }
 
         FractureService.BeginFracture(
             _world, ev.Target, ev.StruckCell,
@@ -908,6 +976,13 @@ public sealed class PlayingState : IGameState
     private void OnCellPulverized(CellPulverizedEvent ev)
     {
         _ctx.CellBudget.Remove(1);
+
+        // Score: area × material density (denser materials score more).
+        if (ev.Body != _player && _world.IsAlive(ev.Body) && _world.HasComponent<FracturableBody>(ev.Body))
+        {
+            float density = _world.GetComponent<FracturableBody>(ev.Body).Material.Density;
+            _ctx.Score.Add(ev.Area * density);
+        }
 
         // Check if a cockpit cell was pulverized on the player entity.
         if (ev.Body == _player && _world.IsAlive(_player) && _world.HasComponent<FracturableBody>(_player))
@@ -1792,6 +1867,11 @@ sealed class GhostSystem : ISystem
                     c.Layer = GameLayers.Player;
                     c.Mask  = GameLayers.Asteroid | GameLayers.Alien;
                 }
+                else if (world.HasComponent<AlienTag>(e))
+                {
+                    c.Layer = GameLayers.Alien;
+                    c.Mask  = GameLayers.Asteroid | GameLayers.Player | GameLayers.Alien;
+                }
                 else
                 {
                     c.Layer = GameLayers.Asteroid;
@@ -1866,10 +1946,272 @@ sealed class RaycastBulletSystem : ISystem
                 Color0 = new Color(255, 235, 130, 200), Color1 = new Color(255, 110, 40, 0),
             });
 
-            int hitMask = GameLayers.Asteroid | GameLayers.Alien;
+            // Alien bullets hit the player; player/grenade bullets hit asteroids and aliens.
+            int hitMask = world.HasComponent<AlienBulletTag>(bullet)
+                ? GameLayers.Asteroid | GameLayers.Player
+                : GameLayers.Asteroid | GameLayers.Alien;
             if (PhysicsQueries.Raycast(world, from, to, hitMask, out var hit))
                 _bus.Publish(new BulletHitEvent(hit.Entity, bullet, hit.PartIndex,
                                                 hit.Point, Vector2.Normalize(d)));
+        }
+    }
+}
+
+sealed class AlienAiSystem : ISystem
+{
+    private readonly GameContext _ctx;
+    private readonly EventBus    _bus;
+    private readonly Random      _rng;
+
+    // Cached per-frame lookups.
+    private Entity   _playerEntity;
+    private Vector2  _playerPos;
+    private bool     _playerAlive;
+
+    // 8-direction context steering offsets.
+    private static readonly Vector2[] Dirs8;
+    static AlienAiSystem()
+    {
+        Dirs8 = new Vector2[8];
+        for (int i = 0; i < 8; i++)
+        {
+            float a = i * MathF.Tau / 8f;
+            Dirs8[i] = new Vector2(MathF.Cos(a), MathF.Sin(a));
+        }
+    }
+
+    public AlienAiSystem(GameContext ctx, EventBus bus, Random rng)
+    { _ctx = ctx; _bus = bus; _rng = rng; }
+
+    public void Update(World world, double dt)
+    {
+        float fdt = (float)dt;
+
+        // Locate player for this frame.
+        _playerAlive  = false;
+        _playerEntity = default;
+        _playerPos    = Vector2.Zero;
+        world.ForEach<PlayerTag, Transform>((Entity e, ref PlayerTag _, ref Transform t) =>
+        {
+            _playerAlive  = true;
+            _playerEntity = e;
+            _playerPos    = t.Position;
+        });
+
+        // Collect asteroid positions for context steering danger map.
+        var asteroidPos = new List<Vector2>();
+        world.ForEach<AsteroidTag, Transform>((Entity _, ref AsteroidTag _, ref Transform t)
+            => asteroidPos.Add(t.Position));
+
+        // Run AI for each alien.
+        var toFire = new List<(Entity alien, string variantKey, Vector2 dir, Vector2 muzzle)>();
+        world.ForEach<AlienTag, AlienVariant, Transform>(
+            (Entity e, ref AlienTag _, ref AlienVariant av, ref Transform t) =>
+        {
+            if (!_ctx.Config.Entities.TryGetValue(av.Key, out var cfg)) return;
+
+            Vector2 pos       = t.Position;
+            Vector2 facingDir = new Vector2(MathF.Cos(t.Rotation - MathF.PI * 0.5f),
+                                            MathF.Sin(t.Rotation - MathF.PI * 0.5f));
+
+            // Choose thrust direction by alien type.
+            Vector2 thrustDir;
+            if (av.Key == "bruiser")
+            {
+                // Direct pursuit: thrust toward player.
+                thrustDir = _playerAlive ? Vector2.Normalize(_playerPos - pos) : facingDir;
+            }
+            else
+            {
+                // Drone: context steering — interest toward player, danger away from asteroids/bounds.
+                thrustDir = _playerAlive
+                    ? DroneSteering(pos, asteroidPos, cfg)
+                    : facingDir;
+            }
+
+            // Lateral thrust penalty: forward component full, lateral component reduced.
+            ApplyLateralPenalty(ref thrustDir, facingDir, cfg.LateralThrustPenaltyMult);
+
+            // Proportional alien degradation: thrust scales with alive propeller fraction.
+            float propFrac = AlivePropellerFraction(world, e);
+            float thrust   = cfg.Thrust * propFrac;
+            if (thrust > 0f && thrustDir.LengthSquared() > 1e-6f)
+                PhysicsSystem.ApplyForce(world, e, Vector2.Normalize(thrustDir) * thrust);
+
+            // Rotate to face player.
+            if (_playerAlive && world.HasComponent<Velocity>(e))
+            {
+                Vector2 targetDir = Vector2.Normalize(_playerPos - pos);
+                float targetAngle = MathF.Atan2(targetDir.Y, targetDir.X) + MathF.PI * 0.5f;
+                float diff        = NormalizeAngle(targetAngle - t.Rotation);
+                float rotSpeed    = av.Key == "bruiser" ? 2.5f : 4f;
+                ref var vel = ref world.GetComponent<Velocity>(e);
+                vel.Angular += diff * rotSpeed * fdt;
+                vel.Angular *= MathF.Exp(-5f * fdt);
+            }
+
+            // Fire when player is in range and cooldown allows.
+            if (!world.HasComponent<ShootCooldown>(e)) return;
+            ref var cd = ref world.GetComponent<ShootCooldown>(e);
+            if (cd.Remaining > 0f) { cd.Remaining = MathF.Max(0f, cd.Remaining - fdt); return; }
+            if (!_playerAlive) return;
+
+            float distSq = (pos - _playerPos).LengthSquared();
+            if (distSq > cfg.DetectionRadius * cfg.DetectionRadius) return;
+
+            float aliveWeaponFrac = AliveWeaponFraction(world, e);
+            if (aliveWeaponFrac <= 0f) return;
+
+            cd.Remaining = cfg.ShootCooldown / MathF.Max(0.01f, aliveWeaponFrac);
+            Vector2 aimDir = Vector2.Normalize(_playerPos - pos);
+            toFire.Add((e, av.Key, aimDir, pos + aimDir * 30f));
+        });
+
+        // Spawn shots outside the ForEach loop.
+        foreach (var (alien, varKey, dir, muzzle) in toFire)
+            FireAlienWeapon(world, alien, varKey, dir, muzzle);
+    }
+
+    private Vector2 DroneSteering(Vector2 pos, List<Vector2> asteroids, EntityConfig cfg)
+    {
+        Span<float> interest = stackalloc float[8];
+        Span<float> danger   = stackalloc float[8];
+
+        Vector2 toPlayer   = _playerPos - pos;
+        float distToPlayer = toPlayer.Length();
+        Vector2 playerDir  = distToPlayer > 1f ? toPlayer / distToPlayer : Dirs8[0];
+
+        float sw = cfg.SteeringWeights?.Pursuit    ?? 1f;
+        float av = cfg.SteeringWeights?.Avoidance  ?? 1f;
+        float sp = cfg.SteeringWeights?.Separation ?? 1f;
+
+        for (int i = 0; i < 8; i++)
+            interest[i] = MathF.Max(0f, Vector2.Dot(Dirs8[i], playerDir)) * sw;
+
+        foreach (var ap in asteroids)
+        {
+            Vector2 toAst = ap - pos;
+            float   distA = toAst.Length();
+            if (distA < 1f || distA > 350f) continue;
+            Vector2 astDir = toAst / distA;
+            float weight = av * (1f - distA / 350f);
+            for (int i = 0; i < 8; i++)
+                danger[i] += MathF.Max(0f, Vector2.Dot(Dirs8[i], astDir)) * weight;
+        }
+
+        var wc    = _ctx.Config.World;
+        float bDist = 300f;
+        AddBoundaryDanger(danger, pos, new Vector2(0f,       pos.Y),     sp, bDist);
+        AddBoundaryDanger(danger, pos, new Vector2(wc.Width, pos.Y),     sp, bDist);
+        AddBoundaryDanger(danger, pos, new Vector2(pos.X,    0f),        sp, bDist);
+        AddBoundaryDanger(danger, pos, new Vector2(pos.X,    wc.Height), sp, bDist);
+
+        int best = 0; float bestVal = float.MinValue;
+        for (int i = 0; i < 8; i++)
+        {
+            float val = interest[i] - danger[i];
+            if (val > bestVal) { bestVal = val; best = i; }
+        }
+        return Dirs8[best];
+    }
+
+    private static void AddBoundaryDanger(Span<float> danger, Vector2 pos, Vector2 boundaryPt,
+        float weight, float maxDist)
+    {
+        Vector2 toBound = boundaryPt - pos;
+        float dist = toBound.Length();
+        if (dist < 1f || dist > maxDist) return;
+        Vector2 dir = toBound / dist;
+        float w = weight * (1f - dist / maxDist);
+        for (int i = 0; i < 8; i++)
+            danger[i] += MathF.Max(0f, Vector2.Dot(Dirs8[i], dir)) * w;
+    }
+
+    private static float AlivePropellerFraction(World world, Entity e)
+    {
+        if (!world.HasComponent<FracturableBody>(e)) return 1f;
+        ref var fb = ref world.GetComponent<FracturableBody>(e);
+        bool[]? pulv = world.HasComponent<FractureProcess>(e)
+            ? world.GetComponent<FractureProcess>(e).Pulverized : null;
+        int total = 0, alive = 0;
+        for (int i = 0; i < fb.Cells.Length; i++)
+        {
+            if (fb.Cells[i].Role != "propeller") continue;
+            total++;
+            if (pulv == null || !pulv[i]) alive++;
+        }
+        return total == 0 ? 1f : (float)alive / total;
+    }
+
+    private static float AliveWeaponFraction(World world, Entity e)
+    {
+        if (!world.HasComponent<FracturableBody>(e)) return 0f;
+        ref var fb = ref world.GetComponent<FracturableBody>(e);
+        bool[]? pulv = world.HasComponent<FractureProcess>(e)
+            ? world.GetComponent<FractureProcess>(e).Pulverized : null;
+        int total = 0, alive = 0;
+        for (int i = 0; i < fb.Cells.Length; i++)
+        {
+            string? r = fb.Cells[i].Role;
+            if (r is not ("cannon" or "shotgun" or "piercing" or "grenade")) continue;
+            total++;
+            if (pulv == null || !pulv[i]) alive++;
+        }
+        return total == 0 ? 0f : (float)alive / total;
+    }
+
+    private static void ApplyLateralPenalty(ref Vector2 thrustDir, Vector2 facing, float penaltyMult)
+    {
+        if (thrustDir.LengthSquared() < 1e-6f) return;
+        float fwdComp = Vector2.Dot(thrustDir, facing);
+        Vector2 fwd   = facing * fwdComp;
+        Vector2 lat   = thrustDir - fwd;
+        thrustDir = fwd + lat * penaltyMult;
+    }
+
+    private static float NormalizeAngle(float a)
+    {
+        while (a > MathF.PI)  a -= MathF.Tau;
+        while (a < -MathF.PI) a += MathF.Tau;
+        return a;
+    }
+
+    private void FireAlienWeapon(World world, Entity alien, string varKey, Vector2 dir, Vector2 muzzle)
+    {
+        string weaponKey = varKey == "bruiser" ? "shotgun" : "cannon";
+        if (!_ctx.Config.Weapons.TryGetValue(weaponKey, out var wcfg)) return;
+
+        if (weaponKey == "cannon")
+        {
+            var b = world.CreateEntity();
+            world.AddComponent(b, new Transform { Position = muzzle, PreviousPosition = muzzle });
+            world.AddComponent(b, new Velocity { Linear = dir * wcfg.ProjectileSpeed });
+            world.AddComponent(b, new BulletTag());
+            world.AddComponent(b, new AlienBulletTag());
+            world.AddComponent(b, new BulletVisual { Color = new Color(220, 80, 80) });
+            world.AddComponent(b, new BulletData { WeaponKey = "cannon", Energy = wcfg.Energy });
+            world.AddComponent(b, new TimeToLive { Remaining = wcfg.TimeToLive });
+        }
+        else  // shotgun
+        {
+            int   rays = wcfg.Rays ?? 7;
+            float half = (wcfg.ConeAngle ?? 18f) * 0.5f * MathF.PI / 180f;
+            float step = rays > 1 ? half * 2f / (rays - 1) : 0f;
+            float baseA = MathF.Atan2(dir.Y, dir.X) - half;
+            float rayE  = wcfg.EnergyPerRay ?? wcfg.Energy / MathF.Max(1f, rays);
+            for (int i = 0; i < rays; i++)
+            {
+                float ang = baseA + step * i;
+                Vector2 d = new(MathF.Cos(ang), MathF.Sin(ang));
+                var b = world.CreateEntity();
+                world.AddComponent(b, new Transform { Position = muzzle, PreviousPosition = muzzle });
+                world.AddComponent(b, new Velocity { Linear = d * wcfg.ProjectileSpeed });
+                world.AddComponent(b, new BulletTag());
+                world.AddComponent(b, new AlienBulletTag());
+                world.AddComponent(b, new BulletVisual { Color = new Color(220, 100, 60) });
+                world.AddComponent(b, new BulletData { WeaponKey = "shotgun", Energy = rayE });
+                world.AddComponent(b, new TimeToLive { Remaining = wcfg.TimeToLive });
+            }
         }
     }
 }

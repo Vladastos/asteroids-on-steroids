@@ -28,5 +28,6 @@ public sealed class Score
         _chainTimer = chainDecay;
     }
 
+    public void Add(float points) => _total += points;
     public void AddBonus(int points) => _total += points;
 }
