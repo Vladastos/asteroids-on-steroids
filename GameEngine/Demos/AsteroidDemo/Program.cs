@@ -41,6 +41,7 @@ var editor = new Editor(gameConfig, shapes, assetsDir);
 var cfg = new Config();
 var session = new DemoSession(W, H, input, cfg, gameConfig, shapes);
 var renderer = new DemoRenderer(W, H);
+var shapeEditor = new ShapeEditorViewport(shapes, assetsDir);
 
 const double FixedDt = 1.0 / 120.0;
 var fixedStep = new FixedTimestep(FixedDt);
@@ -77,28 +78,53 @@ while (!window.ShouldClose)
     if (frameTime > 0) fps += (1.0 / frameTime - fps) * 0.1;   // exponential smoothing
 
     input.BeginFrame();
+    bool inShapeEditor = editor.SelectedTab == 5;
     // While a text-input widget is active: block game hotkeys (WASD / R / M / etc.)
     // and mouse-left so the player can't shoot while typing an asset name.
     // Back / Enter / Escape are always passed through for the text widget itself.
+    // Also suppress when the shape editor is active (viewport owns left-click for seed editing).
     input.SuppressKeyboard = editor.IsTextInputActive;
     input.SuppressMouseLeft = editor.IsMouseOverPanel(input.MouseScreen, W)
-                           || editor.IsTextInputActive;
+                           || editor.IsTextInputActive
+                           || inShapeEditor;
     if (input.IsPressed(KeyCode.Escape) && !editor.IsTextInputActive) break;
 
+    // Shape editor takes priority over panel/game hotkeys when its tab is active.
+    bool shapeConsumedTab = false;
+    if (inShapeEditor)
+    {
+        // Editor panel bounds: left panel = [0, 210], right panel = [W-375, W], tab bar = [0, 32].
+        const float LeftW = 210f, RightW = 375f, TabH = 32f;
+        shapeConsumedTab = shapeEditor.Update(input, editor.SelectedShape, LeftW, W - RightW, TabH, H);
+    }
+
     // Panel / tuning input (once per render frame).
-    if (input.IsPressed(KeyCode.Tab)) showPanel = !showPanel;
-    if (input.IsPressed(KeyCode.Up)) cfg.T.Move(-1);
-    if (input.IsPressed(KeyCode.Down)) cfg.T.Move(1);
-    if (input.IsPressed(KeyCode.Left)) cfg.T.Adjust(-1);
-    if (input.IsPressed(KeyCode.Right)) cfg.T.Adjust(1);
-    if (input.IsPressed(KeyCode.R)) session.Respawn();
-    if (input.IsPressed(KeyCode.M)) { cfg.CycleMaterial(); session.Respawn(); }
+    if (!shapeConsumedTab && input.IsPressed(KeyCode.Tab)) showPanel = !showPanel;
+    if (!inShapeEditor)
+    {
+        if (input.IsPressed(KeyCode.Up))    cfg.T.Move(-1);
+        if (input.IsPressed(KeyCode.Down))  cfg.T.Move(1);
+        if (input.IsPressed(KeyCode.Left))  cfg.T.Adjust(-1);
+        if (input.IsPressed(KeyCode.Right)) cfg.T.Adjust(1);
+        if (input.IsPressed(KeyCode.R))     session.Respawn();
+        if (input.IsPressed(KeyCode.M))     { cfg.CycleMaterial(); session.Respawn(); }
+    }
     if (input.IsPressed(KeyCode.L)) ToggleForceLog();
 
     int steps = fixedStep.Advance(frameTime);
     for (int i = 0; i < steps; i++) session.Update(FixedDt);
 
-    renderer.Draw(window.Renderer, session, cfg, fixedStep.Alpha, showPanel, (float)fps);
+    if (inShapeEditor)
+    {
+        const float LeftW = 210f, RightW = 375f, TabH = 32f;
+        window.Renderer.Begin(new Color(8, 9, 14));  // same bg as simulation
+        shapeEditor.Draw(window.Renderer, editor.SelectedShape, LeftW, W - RightW, TabH, H);
+        window.Renderer.End();
+    }
+    else
+    {
+        renderer.Draw(window.Renderer, session, cfg, fixedStep.Alpha, showPanel, (float)fps);
+    }
     editor.Draw(window.Renderer, input, W, H);
     window.Present();
 

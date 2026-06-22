@@ -44,8 +44,9 @@ sealed class Editor
 
     private bool _dirty;
 
-    public int  SelectedTab   => _tab;
-    public bool IsTextInputActive => _ui.IsTextInputActive;
+    public int    SelectedTab   => _tab;
+    public string SelectedShape => _selShape;
+    public bool   IsTextInputActive => _ui.IsTextInputActive;
 
     public Editor(GameConfig config, Dictionary<string, ShapeData> shapes, string assetsDir)
     {
@@ -492,14 +493,23 @@ sealed class Editor
         _ui.Label($"Outline verts: {sh.Outline.Length}", Ui.ColTextDim);
         _ui.Label($"Seeds: {sh.Seeds.Length}", Ui.ColTextDim);
         _ui.Separator();
-        _ui.Label("Seeds", Ui.ColText, Ui.FontBold);
+
+        _ui.Label("Seed list", Ui.ColText, Ui.FontBold);
         foreach (var seed in sh.Seeds)
-            _ui.Label($"  ({seed.X:0.#}, {seed.Y:0.#})  role={seed.Role}  bond×{seed.BondMult:0.##}", Ui.ColTextDim, Ui.FontSmall);
+        {
+            var rc = ShapeEditorViewport.RoleColor(seed.Role);
+            _ui.Label($"  {seed.Role,-10} bond×{seed.BondMult:0.##}", rc, Ui.FontSmall);
+        }
 
         _ui.Space(8f);
         _ui.Separator();
-        _ui.Label("Shape geometry is authored externally.", Ui.ColTextDim);
-        _ui.Label("Use the shape editor to modify outline/seeds.", Ui.ColTextDim);
+        _ui.Label("Viewport controls:", Ui.ColTextDim);
+        _ui.Label("  Click  — select / add seed", Ui.ColTextDim, Ui.FontSmall);
+        _ui.Label("  Tab    — cycle role", Ui.ColTextDim, Ui.FontSmall);
+        _ui.Label("  Drag   — move seed", Ui.ColTextDim, Ui.FontSmall);
+        _ui.Label("  RMB / Bksp — delete seed", Ui.ColTextDim, Ui.FontSmall);
+        _ui.Label("  Ctrl+S — save shape", Ui.ColTextDim, Ui.FontSmall);
+        _ui.Label("  Ctrl+Z — revert", Ui.ColTextDim, Ui.FontSmall);
     }
 
     // Waves ──────────────────────────────────────────────────────────────────
