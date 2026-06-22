@@ -11,6 +11,11 @@ public class PlayerConfig
     public float        BrakeDrag      { get; set; } = 4.0f;   // exponential decay rate s⁻¹ when no keys held
     public float        Impulse        { get; set; } = 250f;   // px/s velocity burst on key press
     public float        LateralDrag    { get; set; } = 6.0f;   // s⁻¹ bleed on aim-perpendicular velocity
-    public string       StartingWeapon { get; set; } = "cannon";
-    public List<string> Skills         { get; set; } = ["dash", "turbo", "slowmo"];
+    public string       StartingWeapon   { get; set; } = "cannon";
+    public List<string> Skills           { get; set; } = ["dash", "turbo", "slowmo"];
+    /// <summary>All FractureInput.Energy values targeting the player are multiplied by this.
+    /// Primary tuning lever for ship durability — lower = tankier.</summary>
+    public float        PlayerImpactCoeff { get; set; } = 0.4f;
+    /// <summary>Thrust multiplier when some (but not all) propeller cells are alive.</summary>
+    public float        ThrustPartialMult { get; set; } = 0.6f;
 }

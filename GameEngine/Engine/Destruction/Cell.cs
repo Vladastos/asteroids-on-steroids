@@ -14,6 +14,9 @@ public struct Cell
     public float     Area;         // |area| of the cell (px²)
     public float     DensityMult = 1f;  // per-cell density multiplier (default 1 = material density)
     public float     BlastResist = 0f;  // [0,1] fraction of extra energy needed to vaporise this cell
+    /// <summary>Functional role assigned by the shape editor (cockpit, cannon, propeller, etc.).
+    /// Null / empty = generic. Preserved through fracture splits.</summary>
+    public string?   Role        = null;
 
     public Cell() { }  // required by C# when struct has field initializers (CS8983)
 }

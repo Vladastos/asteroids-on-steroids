@@ -34,6 +34,7 @@ public sealed class PlayingState : IGameState
     private bool  _pendingWave  = false;
     private float _waveCountdown = 0f;
     private bool  _mothershpSpawned = false;
+    private bool  _pendingGameOver  = false;
 
     private readonly HashSet<(int, int)> _activeCollisions = new();
 
@@ -89,10 +90,12 @@ public sealed class PlayingState : IGameState
         _bus.Subscribe<FractureSplitEvent>(OnFractureSplit);
 
         _ctx.CellBudget.Reset();
-        _gameTime     = 0f;
-        _waveTimer    = 0f;
-        _pendingWave  = false;
+        _ctx.Score.Reset();
+        _gameTime         = 0f;
+        _waveTimer        = 0f;
+        _pendingWave      = false;
         _mothershpSpawned = false;
+        _pendingGameOver  = false;
 
         SpawnPlayer();
         SpawnNextWave();
@@ -156,7 +159,8 @@ public sealed class PlayingState : IGameState
             }
         }
 
-        // TODO: Transition to GameOverState when player ship core is destroyed.
+        if (!_world.IsAlive(_player)) _pendingGameOver = true;
+        if (_pendingGameOver) return new GameOverState(_ctx, won: false);
         return null;
     }
 
@@ -165,11 +169,11 @@ public sealed class PlayingState : IGameState
         r.Begin(new Color(8, 9, 14));
 
         r.PushTransform(_camera.GetViewMatrix());
-        DrawAsteroids(r, alpha);
+        DrawBodies(r, alpha);   // asteroids + player ship (anything with FracturableBody + BodyColor)
         DrawDebris(r, alpha);
         _fx.Draw(r);
         DrawBullets(r, alpha);
-        DrawPlayer(r, alpha);
+        DrawPlayerAim(r, alpha);
         r.PopTransform();
 
         DrawHud(r);
@@ -486,24 +490,88 @@ public sealed class PlayingState : IGameState
         _player = _world.CreateEntity();
         _world.AddComponent(_player, new Transform { Position = pos, PreviousPosition = pos });
         _world.AddComponent(_player, new Velocity());
-        _world.AddComponent(_player, new RigidBody
-        {
-            Mass = 12f, Inertia = 0f,
-            LinearDrag = 1.2f, AngularDrag = 2f,
-            Restitution = 0.2f, Friction = 0.1f,
-        });
-        _world.AddComponent(_player, new Collider
-        {
-            // TODO: replace with compound shape built from player_ship ShapeData.
-            Shape = new CircleShape(18f),
-            Layer = GameLayers.Player,
-            Mask  = GameLayers.Asteroid | GameLayers.Alien,
-        });
-        _world.AddComponent(_player, new AimComponent { Dir = Vector2.UnitX });
+        _world.AddComponent(_player, new AimComponent { Dir = -Vector2.UnitY });
         _world.AddComponent(_player, new ShootCooldown());
         _world.AddComponent(_player, new ActiveWeapon { Key = _ctx.Config.Player.StartingWeapon });
         _world.AddComponent(_player, new SkillState());
         _world.AddComponent(_player, new PlayerTag());
+
+        var pc = _ctx.Config.Player;
+        if (_ctx.Shapes.TryGetValue(pc.Shape, out var sd) && sd.Seeds.Length >= 1 && sd.Outline.Length >= 3)
+        {
+            BuildAndAttachPlayerBody(sd);
+        }
+        else
+        {
+            _world.AddComponent(_player, new RigidBody
+            {
+                Mass = 12f, Inertia = 0f, LinearDrag = 1.2f, AngularDrag = 2f,
+                Restitution = 0.2f, Friction = 0.1f,
+            });
+            _world.AddComponent(_player, new Collider
+            {
+                Shape = new CircleShape(18f),
+                Layer = GameLayers.Player,
+                Mask  = GameLayers.Asteroid | GameLayers.Alien,
+            });
+        }
+    }
+
+    private void BuildAndAttachPlayerBody(ShapeData sd)
+    {
+        var pc = _ctx.Config.Player;
+        if (!_ctx.Config.Materials.TryGetValue(pc.Material, out var mc))
+            mc = _ctx.Config.Materials.Values.First();
+        var mat = mc.ToFractureProperties();
+
+        float sc = pc.ShapeScale;
+        var outline  = sd.Outline.Select(xy => new Vector2(xy[0] * sc, xy[1] * sc)).ToList();
+        var seedPos  = sd.Seeds.Select(s => new Vector2(s.X * sc, s.Y * sc)).ToList();
+        var seedMult = sd.Seeds.Select(s => s.BondMult).ToList();
+
+        var body = VoronoiTessellator.BuildFromExplicitSeeds(outline, seedPos, seedMult, mat, _rng);
+        ApplyShapeSeeds(body, sd.Seeds, sc);
+
+        float area    = VoronoiTessellator.TotalArea(body);
+        float mass    = MathF.Max(1f, mat.Density * area);
+        float inertia = VoronoiTessellator.ComputeInertia(body, mass);
+
+        var color = new BodyColor { Fill = new Color(60, 120, 200), Outline = new Color(140, 190, 255) };
+        _world.AddComponent(_player, new RigidBody
+        {
+            Mass = mass, Inertia = inertia, LinearDrag = 1.2f, AngularDrag = 2f,
+            Restitution = 0.2f, Friction = 0.1f,
+        });
+        _world.AddComponent(_player, new Collider
+        {
+            Shape = VoronoiTessellator.BuildShape(body),
+            Layer = GameLayers.Player,
+            Mask  = GameLayers.Asteroid | GameLayers.Alien,
+        });
+        _world.AddComponent(_player, body);
+        _world.AddComponent(_player, color);
+        var (edgeOut, edgeCr) = ComputeEdges(body.Cells, body.Bonds);
+        _world.AddComponent(_player, new RenderOutline { Outline = edgeOut, Cracks = edgeCr });
+    }
+
+    // Matches each Voronoi cell to the nearest seed (by centroid proximity) and
+    // applies that seed's role, densityMult, and blastResist to the cell.
+    private static void ApplyShapeSeeds(FracturableBody body, SeedData[] seeds, float scale)
+    {
+        for (int ci = 0; ci < body.Cells.Length; ci++)
+        {
+            float bestSq = float.MaxValue;
+            int   bestI  = 0;
+            for (int si = 0; si < seeds.Length; si++)
+            {
+                var sp = new Vector2(seeds[si].X * scale, seeds[si].Y * scale);
+                float dsq = (body.Cells[ci].Centroid - sp).LengthSquared();
+                if (dsq < bestSq) { bestSq = dsq; bestI = si; }
+            }
+            body.Cells[ci].Role        = seeds[bestI].Role;
+            body.Cells[ci].DensityMult = seeds[bestI].DensityMult;
+            body.Cells[ci].BlastResist = seeds[bestI].BlastResist;
+        }
     }
 
     // ── Generic body spawning ─────────────────────────────────────────────────
@@ -585,6 +653,32 @@ public sealed class PlayingState : IGameState
         return new FractureGroup { Id = id, FramesLeft = 16 };
     }
 
+    private (AimComponent aim, ShootCooldown cd, ActiveWeapon wep, SkillState sk)
+        SavePlayerState(Entity e)
+    {
+        var aim = _world.HasComponent<AimComponent>(e)  ? _world.GetComponent<AimComponent>(e)  : new AimComponent { Dir = -Vector2.UnitY };
+        var cd  = _world.HasComponent<ShootCooldown>(e) ? _world.GetComponent<ShootCooldown>(e) : default;
+        var wep = _world.HasComponent<ActiveWeapon>(e)  ? _world.GetComponent<ActiveWeapon>(e)  : new ActiveWeapon { Key = _ctx.Config.Player.StartingWeapon };
+        var sk  = _world.HasComponent<SkillState>(e)    ? _world.GetComponent<SkillState>(e)    : default;
+        return (aim, cd, wep, sk);
+    }
+
+    private void TransferPlayerToFragment(Entity ne, in FragmentSpec f,
+        AimComponent aim, ShootCooldown cd, ActiveWeapon wep, SkillState sk)
+    {
+        _world.AddComponent(ne, new PlayerTag());
+        _world.AddComponent(ne, aim);
+        _world.AddComponent(ne, cd);
+        _world.AddComponent(ne, new ActiveWeapon { Key = wep.Key ?? _ctx.Config.Player.StartingWeapon });
+        _world.AddComponent(ne, sk);
+        _player = ne;
+
+        // Death condition 2: cockpit fragment has no functional cells.
+        bool hasFunc = f.Body.Cells.Any(c =>
+            c.Role is "cannon" or "shotgun" or "piercing" or "grenade" or "propeller");
+        if (!hasFunc) _pendingGameOver = true;
+    }
+
     private void CopyTags(Entity source, Entity target)
     {
         if (!_world.IsAlive(source)) return;
@@ -620,9 +714,14 @@ public sealed class PlayingState : IGameState
 
         EmitFlash(ev.Point, 0.5f * bulletMass * bulletVel.LengthSquared());
 
+        // Player ship absorbs reduced fracture energy.
+        float adjMass = ev.Target == _player
+            ? bulletMass * _ctx.Config.Player.PlayerImpactCoeff
+            : bulletMass;
+
         FractureService.BeginFracture(
             _world, ev.Target, ev.StruckCell,
-            ev.Point, ev.ShotDir, bulletVel, bulletMass,
+            ev.Point, ev.ShotDir, bulletVel, adjMass,
             profile, FractureTiming.Default, _rng);
     }
 
@@ -669,17 +768,39 @@ public sealed class PlayingState : IGameState
 
         Vector2 dirAB = vRel.LengthSquared() > 1f
             ? Vector2.Normalize(vRel) : ev.Contact.Normal;
+
+        float impCoeff = _ctx.Config.Player.PlayerImpactCoeff;
+        float massBForA = eA == _player ? mB * impCoeff : mB;
+        float massAForB = eB == _player ? mA * impCoeff : mA;
+
         FractureService.BeginFracture(_world, eA, -1, cp, dirAB,
-            vRel + vA.Linear, mB, weapon, FractureTiming.Default, _rng);
+            vRel + vA.Linear, massBForA, weapon, FractureTiming.Default, _rng);
         FractureService.BeginFracture(_world, eB, -1, cp, -dirAB,
-            -vRel + vB.Linear, mA, weapon, FractureTiming.Default, _rng);
+            -vRel + vB.Linear, massAForB, weapon, FractureTiming.Default, _rng);
     }
 
     private void OnCellPulverized(CellPulverizedEvent ev)
     {
         _ctx.CellBudget.Remove(1);
 
-        // TODO: award score for vaporised cells (area × material.Density).
+        // Check if a cockpit cell was pulverized on the player entity.
+        if (ev.Body == _player && _world.IsAlive(_player) && _world.HasComponent<FracturableBody>(_player))
+        {
+            ref var fb = ref _world.GetComponent<FracturableBody>(_player);
+            ref var t  = ref _world.GetComponent<Transform>(_player);
+            // Transform the world centroid to body-local space to identify the cell.
+            float cos = MathF.Cos(-t.Rotation), sin = MathF.Sin(-t.Rotation);
+            Vector2 d = ev.WorldCentroid - t.Position;
+            Vector2 localPos = new(d.X * cos - d.Y * sin, d.X * sin + d.Y * cos);
+            float bestSq = float.MaxValue;
+            string? role = null;
+            for (int i = 0; i < fb.Cells.Length; i++)
+            {
+                float dsq = (fb.Cells[i].Centroid - localPos).LengthSquared();
+                if (dsq < bestSq) { bestSq = dsq; role = fb.Cells[i].Role; }
+            }
+            if (role == "cockpit") _pendingGameOver = true;
+        }
 
         BodyColor color = GetBodyColor(ev.Body);
         EmitDustBurst(ev.WorldCentroid,
@@ -694,23 +815,41 @@ public sealed class PlayingState : IGameState
     private void OnFractureCompleted(FractureCompletedEvent ev)
     {
         _activeCollisions.RemoveWhere(p => p.Item1 == ev.Body.Id || p.Item2 == ev.Body.Id);
+        bool isPlayer = ev.Body == _player;
         BodyColor color = GetBodyColor(ev.Body);
+        var (savedAim, savedCd, savedWep, savedSk) = isPlayer ? SavePlayerState(ev.Body) : default;
         var fg = MakeFractureGroup(ev.Body);
+        bool cockpitFound = false;
+
         foreach (var f in ev.Fragments)
         {
             if (f.IsDebris) { EmitDustBurst(f.WorldCentroid, f.Linear, Vector2.Zero, f.Area, color); continue; }
             var ne = SpawnFracturableBody(f.Body, f.WorldCentroid, f.Rotation, f.Linear, f.Angular, color, ghost: true);
             _world.AddComponent(ne, fg);
             CopyTags(ev.Body, ne);
+            if (isPlayer && !cockpitFound && f.Body.Cells.Any(c => c.Role == "cockpit"))
+            {
+                cockpitFound = true;
+                TransferPlayerToFragment(ne, f, savedAim, savedCd, savedWep, savedSk);
+            }
         }
         _world.DestroyEntity(ev.Body);
+
+        if (isPlayer)
+        {
+            if (!cockpitFound) _pendingGameOver = true;
+        }
     }
 
     private void OnFractureSplit(FractureSplitEvent ev)
     {
         _activeCollisions.RemoveWhere(p => p.Item1 == ev.Body.Id || p.Item2 == ev.Body.Id);
+        bool isPlayer = ev.Body == _player;
         BodyColor color = GetBodyColor(ev.Body);
+        var (savedAim, savedCd, savedWep, savedSk) = isPlayer ? SavePlayerState(ev.Body) : default;
         var fg = MakeFractureGroup(ev.Body);
+        bool cockpitFound = false;
+
         foreach (var p in ev.Pieces)
         {
             var f = p.Spec;
@@ -719,8 +858,15 @@ public sealed class PlayingState : IGameState
             _world.AddComponent(ne, fg);
             CopyTags(ev.Body, ne);
             if (p.Process.HasValue) _world.AddComponent(ne, p.Process.Value);
+            if (isPlayer && !cockpitFound && f.Body.Cells.Any(c => c.Role == "cockpit"))
+            {
+                cockpitFound = true;
+                TransferPlayerToFragment(ne, f, savedAim, savedCd, savedWep, savedSk);
+            }
         }
         _world.DestroyEntity(ev.Body);
+
+        if (isPlayer && !cockpitFound) _pendingGameOver = true;
     }
 
     // ── Rendering ─────────────────────────────────────────────────────────────
@@ -729,7 +875,8 @@ public sealed class PlayingState : IGameState
     private readonly List<int>     _meshLens  = new();
     private readonly List<Vector2> _dbuf      = new();
 
-    private void DrawAsteroids(IRenderer r, float alpha)
+    // Draws every entity that has a FracturableBody + BodyColor (asteroids, player ship, aliens).
+    private void DrawBodies(IRenderer r, float alpha)
     {
         _world.ForEach<Transform, FracturableBody, BodyColor>(
             (Entity e, ref Transform t, ref FracturableBody fb, ref BodyColor col) =>
@@ -801,17 +948,14 @@ public sealed class PlayingState : IGameState
         });
     }
 
-    private void DrawPlayer(IRenderer r, float alpha)
+    // Draws the player's aim line (ship body is drawn by DrawBodies).
+    private void DrawPlayerAim(IRenderer r, float alpha)
     {
         if (!_world.IsAlive(_player)) return;
-        _world.ForEach<Transform, PlayerTag, AimComponent>(
-            (Entity _, ref Transform t, ref PlayerTag _, ref AimComponent aim) =>
-        {
-            var (p, _) = Interp(t, alpha);
-            r.FillCircle(p, 18f, new Color(70, 130, 240));
-            r.DrawCircle(p, 18f, new Color(170, 205, 255), 2f);
-            r.DrawLine(p, p + aim.Dir * 28f, new Color(170, 205, 255), 2f);
-        });
+        if (!_world.HasComponent<Transform>(_player) || !_world.HasComponent<AimComponent>(_player)) return;
+        var (p, _) = Interp(_world.GetComponent<Transform>(_player), alpha);
+        var aim    = _world.GetComponent<AimComponent>(_player).Dir;
+        r.DrawLine(p, p + aim * 32f, new Color(170, 205, 255, 160), 2f);
     }
 
     private void DrawHud(IRenderer r)
@@ -1044,6 +1188,26 @@ sealed class PlayerControlSystem : ISystem
 
     public PlayerControlSystem(GameContext ctx, Camera camera) { _ctx = ctx; _camera = camera; }
 
+    private float ComputeThrustMult(World world)
+    {
+        if (!world.HasComponent<FracturableBody>(Player)) return 1f;
+        ref var fb = ref world.GetComponent<FracturableBody>(Player);
+        bool[]? pulv = world.HasComponent<FractureProcess>(Player)
+            ? world.GetComponent<FractureProcess>(Player).Pulverized
+            : null;
+        int total = 0, alive = 0;
+        for (int i = 0; i < fb.Cells.Length; i++)
+        {
+            if (fb.Cells[i].Role != "propeller") continue;
+            total++;
+            if (pulv == null || !pulv[i]) alive++;
+        }
+        if (total == 0) return 1f;     // no propellers defined → full thrust
+        if (alive == 0) return 0f;     // all propellers gone → no thrust
+        if (alive < total) return _ctx.Config.Player.ThrustPartialMult;
+        return 1f;
+    }
+
     public void Update(World world, double dt)
     {
         if (!world.IsAlive(Player)) return;
@@ -1053,14 +1217,15 @@ sealed class PlayerControlSystem : ISystem
         ref var cd  = ref world.GetComponent<ShootCooldown>(Player);
         ref var wep = ref world.GetComponent<ActiveWeapon>(Player);
 
-        // Movement
+        // Movement — thrust degraded by propeller cell survival.
+        float thrustMult = ComputeThrustMult(world);
         Vector2 a = Vector2.Zero;
         var inp = _ctx.Input;
         if (inp.IsHeld(KeyCode.W)) a.Y -= 1; if (inp.IsHeld(KeyCode.S)) a.Y += 1;
         if (inp.IsHeld(KeyCode.A)) a.X -= 1; if (inp.IsHeld(KeyCode.D)) a.X += 1;
-        if (a != Vector2.Zero)
+        if (a != Vector2.Zero && thrustMult > 0f)
         {
-            float thrust = _ctx.Config.Player.Thrust;
+            float thrust = _ctx.Config.Player.Thrust * thrustMult;
             PhysicsSystem.ApplyForce(world, Player, Vector2.Normalize(a) * thrust);
         }
 
@@ -1173,15 +1338,23 @@ sealed class GhostSystem : ISystem
 {
     public void Update(World world, double dt)
     {
-        world.ForEach<FractureGhost, Collider>((Entity _, ref FractureGhost g, ref Collider c) =>
+        world.ForEach<FractureGhost, Collider>((Entity e, ref FractureGhost g, ref Collider c) =>
         {
             if (g.Done) return;
             g.Remaining -= (float)dt;
             if (g.Remaining <= 0f)
             {
-                c.Layer = GameLayers.Asteroid;
-                c.Mask  = GameLayers.Asteroid | GameLayers.Player;
-                g.Done  = true;
+                if (world.HasComponent<PlayerTag>(e))
+                {
+                    c.Layer = GameLayers.Player;
+                    c.Mask  = GameLayers.Asteroid | GameLayers.Alien;
+                }
+                else
+                {
+                    c.Layer = GameLayers.Asteroid;
+                    c.Mask  = GameLayers.Asteroid | GameLayers.Player;
+                }
+                g.Done = true;
             }
         });
     }
