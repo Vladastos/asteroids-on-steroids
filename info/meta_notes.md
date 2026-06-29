@@ -84,5 +84,31 @@ Mothership rework/improvement.
 
 Optimizations so fps doesn't drop the moment a grenade detonates. Profiling first.
 
-### LOGS piercing
+## Notes for Claude
 
+There is a problem with the computed energy from collision among fracturable bodies and it's almost certainly caused by the relativeVelocity computation. I noticed that the piercing round, even while traveling at a very high speed (2500 in the game_config) and having a respectable mass, sometimes generates very little energy (~100 or less) and bounces off of the impacted asteroid.
+
+Does the system run before the CollisionSystem changes velocities? Does the relative velocity take into account the angular velocities of the bodies and the lever length? 
+
+Regardless of this bug, this is what I would do:
+
+Refactor of Fracture OnCollision, BeginFracture and ComputeEnergy
+The clean fix is to change all three together:
+
+OnCollision computes the true contact relative velocity and normal speed.
+BeginFracture accepts the normal impact speed (or directly the impact energy) instead of an impactor velocity.
+ComputeEnergy uses that speed without reconstructing velocities.
+
+That produces a much simpler and less error-prone design, but it requires coordinated changes across all three functions.
+
+The fact that OnCollision method of the FractureGameplay handles 3 unrelated behaviours (grenades, asteroid-on-asteroid, piercing round) isn't really SOLID. I'd split it like this:
+
+GrenadeSystem — detonate grenades on contact.
+ProjectileSystem — handle piercing-round impacts, projectile-specific fracture, ricochet, penetration, velocity clamping, etc.
+FractureCollisionSystem (your current OnCollision) — handle collisions between ordinary fracturable rigid bodies and compute impact energy.
+
+That separation follows the single-responsibility principle and makes each system much easier to reason about and extend.
+
+There are also some visual bugs:
+1. On fracturing, sometimes cracks appear and disappear some frames later, this shouldn't be possible since cracks are rendered only when a bond is broken, and that's irreversible.
+2. The player shape HUD in the game, the cells should gradually become orange then red based on the damage absorbed by the cells, but this never happens.

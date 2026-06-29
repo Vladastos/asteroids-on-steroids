@@ -13,4 +13,8 @@ public struct Collider
     public CollisionShape Shape;
     public int            Layer;
     public int            Mask;
+    /// <summary>Sensor/trigger: the pair is still detected and a CollisionEvent is published, but
+    /// no overlap-separation or velocity impulse is applied (the body passes through). Used by the
+    /// piercing round so it penetrates instead of being arrested at the surface.</summary>
+    public bool           Sensor;
 }

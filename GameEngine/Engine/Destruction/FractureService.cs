@@ -39,7 +39,7 @@ public static class FractureService
     /// </summary>
     public static void BeginFracture(
         World world, Entity body, int struckCell,
-        Vector2 impactPoint, Vector2 impactDir, Vector2 impactorVelocity, float impactorMass,
+        Vector2 impactPoint, Vector2 impactDir, float normalSpeed, float impactorMass,
         in WeaponProfile weapon, Random rng)
     {
         if (!world.IsAlive(body)) return;
@@ -52,30 +52,18 @@ public static class FractureService
         ref var rb = ref world.GetComponent<RigidBody>(body);
         if (fb.Cells.Length == 0) return;
 
-        Vector2 bodyLinear = Vector2.Zero;
         float bodyAngular = 0f;
         if (world.HasComponent<Velocity>(body))
-        {
-            ref var v = ref world.GetComponent<Velocity>(body);
-            bodyLinear = v.Linear;
-            bodyAngular = v.Angular;
-        }
+            bodyAngular = world.GetComponent<Velocity>(body).Angular;
 
         int cell = struckCell;
         if (cell < 0 || cell >= fb.Cells.Length)
             cell = NearestCell(fb, t.Position, t.Rotation, impactPoint);
 
         Vector2 dir = impactDir.LengthSquared() > 1e-8f ? Vector2.Normalize(impactDir) : Vector2.UnitX;
-        float E = ComputeEnergy(impactPoint, dir, impactorVelocity, impactorMass,
-                                t.Position, bodyLinear, rb.Mass, rb.Inertia, fb.Material.Restitution);
+        float E = ComputeEnergy(impactPoint, dir, normalSpeed, impactorMass,
+                                t.Position, rb.Mass, rb.Inertia, fb.Material.Restitution);
         if (E <= 0f) return;
-
-        // If it's a piercing round, print the energy and the impactor mass, so we can tune the blast fraction to match the desired crater size.
-        if (weapon.Directionality > 0.84f && weapon.BlastFraction < 0.06f)
-        {
-            float EDebug = ComputeEnergyDebug(impactPoint, dir, impactorVelocity, impactorMass,
-                                t.Position, bodyLinear, rb.Mass, rb.Inertia, fb.Material.Restitution);
-        }
 
         ForceLog.CurrentBody = body.Id;
         if (ForceLog.On(ForceCat.Energy, body.Id))
@@ -84,7 +72,7 @@ public static class FractureService
                 $"vs cell0 strength≈{(fb.Bonds.Length > 0 ? fb.Bonds[0].Strength : 0f):0.#}");
 
         // Knockback recoil applied now, at the moment of impact; fragments inherit it via BodyLinear.
-        Vector2 kick = dir * (impactorVelocity.Length() * weapon.Knockback);
+        Vector2 kick = dir * (normalSpeed * weapon.Knockback);
         if (world.HasComponent<Velocity>(body))
         {
             ref var vKick = ref world.GetComponent<Velocity>(body);
@@ -153,11 +141,9 @@ public static class FractureService
     /// then E = ½·m_eff·v_n²·(1−e²). No ignition stress — energy alone floods the graph.
     /// </summary>
     private static float ComputeEnergy(
-        Vector2 impactPoint, Vector2 dir, Vector2 impactorVel, float impactorMass,
-        Vector2 bodyPos, Vector2 bodyLinear, float mBody, float iBody, float restitution)
+        Vector2 impactPoint, Vector2 dir, float normalSpeed, float impactorMass,
+        Vector2 bodyPos, float mBody, float iBody, float restitution)
     {
-        float vRelN = MathF.Abs(Vector2.Dot(impactorVel - bodyLinear, dir));
-
         Vector2 r = impactPoint - bodyPos;
         float rxn = r.X * dir.Y - r.Y * dir.X;                       // (r × n) z-component
         float invMass = (impactorMass > 0f ? 1f / impactorMass : 0f)
@@ -166,30 +152,9 @@ public static class FractureService
         float mEff = invMass > 1e-9f ? 1f / invMass : mBody;
 
         float e = Math.Clamp(restitution, 0f, 0.95f);
-        // EnergyScale is the single global conversion from physical kinetic energy to fracture-energy
-        // units, so REAL masses can be used everywhere (bullets, asteroid collisions) consistently.
-        return FractureTuning.EnergyScale * 0.5f * mEff * vRelN * vRelN * (1f - e * e);
-    }
-
-    private static float ComputeEnergyDebug(
-        Vector2 impactPoint, Vector2 dir, Vector2 impactorVel, float impactorMass,
-        Vector2 bodyPos, Vector2 bodyLinear, float mBody, float iBody, float restitution)
-    {
-        float vRelN = MathF.Abs(Vector2.Dot(impactorVel - bodyLinear, dir));
-        Console.WriteLine($"ComputeEnergy: impactorVel={impactorVel}, bodyLinear={bodyLinear}, dir={dir}, vRelN={vRelN}");
-        Vector2 r = impactPoint - bodyPos;
-        float rxn = r.X * dir.Y - r.Y * dir.X;                       // (r × n) z-component
-        float invMass = (impactorMass > 0f ? 1f / impactorMass : 0f)
-                      + (mBody > 0f ? 1f / mBody : 0f);
-        if (iBody > 1e-6f) invMass += rxn * rxn / iBody;             // rotational lever arm
-        float mEff = invMass > 1e-9f ? 1f / invMass : mBody;
-
-        float e = Math.Clamp(restitution, 0f, 0.95f);
-        Console.WriteLine($"E = {FractureTuning.EnergyScale * 0.5f * mEff * vRelN * vRelN * (1f - e * e)}: impactorMass={impactorMass}, mBody={mBody}, iBody={iBody}, vRelN={vRelN}, mEff={mEff}, restitution={restitution}, (1 - e * e)={1 - e * e}");
-        Console.WriteLine($"{FractureTuning.EnergyScale * 0.5f * mEff * vRelN * vRelN * (1f - e * e)} (E) = {FractureTuning.EnergyScale} (EnergyScale) * 0.5 * {mEff} (mEff) * {vRelN}^2 (vRelN^2) * (1 - {e}^2 (e^2))");
-        // EnergyScale is the single global conversion from physical kinetic energy to fracture-energy
-        // units, so REAL masses can be used everywhere (bullets, asteroid collisions) consistently.
-        return FractureTuning.EnergyScale * 0.5f * mEff * vRelN * vRelN * (1f - e * e);
+        // normalSpeed is the true pre-solve normal closing speed (supplied by the caller — no velocity
+        // reconstruction). EnergyScale converts physical KE to fracture-energy units (real masses).
+        return FractureTuning.EnergyScale * 0.5f * mEff * normalSpeed * normalSpeed * (1f - e * e);
     }
 
     private static int NearestCell(in FracturableBody fb, Vector2 pos, float rot, Vector2 worldPoint)

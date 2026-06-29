@@ -1,15 +1,24 @@
-# Wave spawn log — started 2026-06-28 22:45:53
+# Wave spawn log — started 2026-06-29 11:48:40
 
 [Wave 1] T=0.0s   budget=20   sizeBias=-0.20   maxCells=300
   4 asteroids   ~186 cells total
   unstable   x3   sizes: 1.12 1.15 1.53   cells: ~47 ~49 ~88   subtotal≈184
   gravel     x1   sizes: 0.81   cells: ~2   subtotal≈2
 
-[Wave 2] T=303.2s   budget=70   sizeBias=+0.20   maxCells=600
+[Wave 2] T=302.6s   budget=70   sizeBias=+0.20   maxCells=600
   11 asteroids   ~404 cells total   3 aliens
   armored    x2   sizes: 0.82 1.16   cells: ~5 ~11   subtotal≈16
   spinner    x3   sizes: 1.64 1.75 1.00   cells: ~27 ~31 ~10   subtotal≈68
   standard   x1   sizes: 1.35   cells: ~24   subtotal≈24
   unstable   x4   sizes: 1.03 1.31 0.96 1.92   cells: ~39 ~64 ~35 ~139   subtotal≈277
   gravel     x1   sizes: 2.44   cells: ~19   subtotal≈19
+  drone      ×3 (alien)
+
+[Wave 3] T=324.3s   budget=70   sizeBias=+0.23   maxCells=600
+  10 asteroids   ~337 cells total   3 aliens
+  standard   x2   sizes: 1.04 1.91   cells: ~14 ~48   subtotal≈62
+  boulder    x3   sizes: 1.35 1.16 1.26   cells: ~46 ~33 ~39   subtotal≈118
+  armored    x1   sizes: 1.44   cells: ~17   subtotal≈17
+  unstable   x3   sizes: 1.49 0.87 0.87   cells: ~83 ~28 ~28   subtotal≈139
+  gravel     x1   sizes: 0.52   cells: ~1   subtotal≈1
   drone      ×3 (alien)

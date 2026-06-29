@@ -187,7 +187,7 @@ public sealed class FractureGameplay
 
         FractureService.BeginFracture(
             _world, ev.Target, ev.StruckCell,
-            ev.Point, ev.ShotDir, bulletVel, adjMass,
+            ev.Point, ev.ShotDir, bulletVel.Length(), adjMass,
             profile, _rng);
     }
 
@@ -225,22 +225,18 @@ public sealed class FractureGameplay
                 WeaponProfile pProfile = pcfg.ToWeaponProfile();
                 // Real impactor mass (the round's physical mass) — EnergyScale handles the units.
                 float pMass = pcfg.Mass ?? _ctx.Config.Fracture.BulletMass;
-                Vector2 pVel = _world.HasComponent<Velocity>(piercing)
-                    ? _world.GetComponent<Velocity>(piercing).Linear : Vector2.Zero;
                 float adjMass = target == Player ? pMass * _ctx.Config.Player.PlayerImpactCoeff : pMass;
                 Vector2 pcp = ev.Contact.ContactPoint;
+                float speed = ev.ApproachSpeed;   // true PRE-solve closing speed (not the post-bounce velocity)
 
                 // The round drives a focused crack into the target …
                 FractureService.BeginFracture(_world, target, -1, pcp,
-                    pt.Direction, pVel, adjMass, pProfile, _rng);
+                    pt.Direction, speed, adjMass, pProfile, _rng);
 
-                // … and takes the reciprocal impact itself, so the round cracks/sheds on hit
-                // instead of staying inert. Use the WEAPON's own mass (not the target's huge
-                // mass) as the impactor — otherwise the reduced-mass energy vaporises the round.
-                Vector2 tVel = _world.HasComponent<Velocity>(target)
-                    ? _world.GetComponent<Velocity>(target).Linear : Vector2.Zero;
+                // … and takes the reciprocal impact itself (same closing speed), so it cracks/sheds
+                // on hit instead of staying inert; its own mass keeps the reduced-mass energy sane.
                 FractureService.BeginFracture(_world, piercing, -1, pcp,
-                    -pt.Direction, tVel, pMass, pProfile, _rng);
+                    -pt.Direction, speed, pMass, pProfile, _rng);
 
                 // Clamp lateral velocity on the round to keep it on-axis.
                 if (_world.HasComponent<Velocity>(piercing))
@@ -260,16 +256,9 @@ public sealed class FractureGameplay
         var pair = eA.Id < eB.Id ? (eA.Id, eB.Id) : (eB.Id, eA.Id);
         if (_activeCollisions.Contains(pair)) return;
 
-        ref var vA = ref _world.GetComponent<Velocity>(eA);
-        ref var vB = ref _world.GetComponent<Velocity>(eB);
-        ref var tA = ref _world.GetComponent<Transform>(eA);
-        ref var tB = ref _world.GetComponent<Transform>(eB);
-        Vector2 cp = ev.Contact.ContactPoint;
-        Vector2 rA = cp - tA.Position, rB = cp - tB.Position;
-        Vector2 vcA = vA.Linear + new Vector2(-vA.Angular * rA.Y, vA.Angular * rA.X);
-        Vector2 vcB = vB.Linear + new Vector2(-vB.Angular * rB.Y, vB.Angular * rB.X);
-        Vector2 vRel = vcB - vcA;
-        float approach = -Vector2.Dot(vRel, ev.Contact.Normal);
+        // True PRE-solve closing speed (incl. spin·lever) captured by CollisionSystem before the
+        // impulse — not the post-bounce velocity that produced the tiny-energy ricochet bug.
+        float approach = ev.ApproachSpeed;
         if (approach < _ctx.Config.Fracture.AsteroidCollisionThreshold) return;
 
         _activeCollisions.Add(pair);
@@ -285,26 +274,19 @@ public sealed class FractureGameplay
             Knockback      = 0f,                              // bodies already exchange momentum via collision
         };
 
+        Vector2 cp = ev.Contact.ContactPoint;
+        Vector2 n  = ev.Contact.Normal;   // points B→A; the crack drives into each body (+n into A, −n into B)
         _effects.EmitFlash(cp, 0.5f * (mA * mB / (mA + mB)) * approach * approach);
 
-        Vector2 vRelDir    = vRel.LengthSquared() > 1f ? Vector2.Normalize(vRel) : ev.Contact.Normal;
-        Vector2 blended    = Vector2.Lerp(ev.Contact.Normal, vRelDir, frac.AsteroidDirSpin);
-        Vector2 impactDirAB = blended.LengthSquared() > 1e-6f ? Vector2.Normalize(blended) : ev.Contact.Normal;
-
-        // Real masses — the global EnergyScale converts physical KE to fracture units, so collisions
-        // and bullets are on one consistent scale (no per-interaction fudge). Gentle bumps fall below
-        // bond strength naturally; AsteroidCollisionThreshold trims the very-low-speed end.
         float impCoeff = _ctx.Config.Player.PlayerImpactCoeff;
         float massBForA = eA == Player ? mB * impCoeff : mB;
         float massAForB = eB == Player ? mA * impCoeff : mA;
 
         bool dashInv = IsDashInvincible();
         if (!(eA == Player && dashInv))
-            FractureService.BeginFracture(_world, eA, -1, cp, impactDirAB,
-                vRel + vA.Linear, massBForA, weapon, _rng);
+            FractureService.BeginFracture(_world, eA, -1, cp, n, approach, massBForA, weapon, _rng);
         if (!(eB == Player && dashInv))
-            FractureService.BeginFracture(_world, eB, -1, cp, -impactDirAB,
-                -vRel + vB.Linear, massAForB, weapon, _rng);
+            FractureService.BeginFracture(_world, eB, -1, cp, -n, approach, massAForB, weapon, _rng);
     }
 
     private void OnCellPulverized(CellPulverizedEvent ev)

@@ -111,14 +111,21 @@ public sealed class CollisionSystem : ISystem
                 for (int k = 1; k < _hitBuf.Count; k++)
                     if (_hitBuf[k].Depth > deepest.Depth) deepest = _hitBuf[k];
 
-                if (ResolveOverlap)
+                // Sensors (e.g. the piercing round) are detected + reported but never resolved:
+                // no separation, no contact constraints → no impulse. They pass through.
+                bool sensor = cA.Sensor || cB.Sensor;
+
+                if (ResolveOverlap && !sensor)
                 {
                     TrySeparate(world, entityA, ref tA, entityB, ref tB, deepest);
                     for (int k = 0; k < _hitBuf.Count; k++)
                         GatherContact(world, entityA, entityB, _hitBuf[k]);
                 }
 
-                _bus.Publish(new CollisionEvent(entityA, entityB, deepest));
+                // Capture the PRE-solve normal closing speed at the deepest contact (Phase 4 below
+                // mutates velocities) so fracture energy uses the true approach, not the bounce.
+                float approach = ApproachNormalSpeed(world, entityA, entityB, tA.Position, tB.Position, deepest);
+                _bus.Publish(new CollisionEvent(entityA, entityB, deepest, approach));
             }
         });
 
@@ -362,6 +369,18 @@ public sealed class CollisionSystem : ISystem
     // Velocity of a body at a point offset r from its centre (includes rotation).
     private static Vector2 VelAt(in Velocity v, Vector2 r) =>
         v.Linear + new Vector2(-v.Angular * r.Y, v.Angular * r.X);
+
+    // Normal closing speed at the contact (≥0 = approaching), including each body's spin·lever.
+    // Bodies without Velocity count as stationary. Normal points B→A, so approach is -vRel·n.
+    private static float ApproachNormalSpeed(World world, Entity a, Entity b,
+        Vector2 posA, Vector2 posB, in ContactInfo c)
+    {
+        Vector2 vA = world.HasComponent<Velocity>(a)
+            ? VelAt(world.GetComponent<Velocity>(a), c.ContactPoint - posA) : Vector2.Zero;
+        Vector2 vB = world.HasComponent<Velocity>(b)
+            ? VelAt(world.GetComponent<Velocity>(b), c.ContactPoint - posB) : Vector2.Zero;
+        return MathF.Max(0f, -Vector2.Dot(vA - vB, c.Normal));
+    }
 
     // 2-D scalar cross product.
     private static float Cross(Vector2 a, Vector2 b) => a.X * b.Y - a.Y * b.X;

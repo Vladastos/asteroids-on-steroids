@@ -84,7 +84,7 @@
       "crackSpeed": 150,
       "grainArea": 5000,
       "minFragmentArea": 800,
-      "density": 9,
+      "density": 5,
       "cellToughness": 1.5,
       "spinPreStress": 0.04,
       "detachCellScale": 0.94,
@@ -156,7 +156,7 @@
       "spreadJitter": 0,
       "drag": 0,
       "mass": 50,
-      "lateralImpulseClamp": 1000,
+      "lateralImpulseClamp": 10000,
       "shapeScale": 0.5
     },
     "grenade": {
