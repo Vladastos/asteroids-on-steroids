@@ -1,6 +1,6 @@
 {
   "name": "Mothership",
-  "material": "titanium",
+  "material": "bollocksium",
   "outline": [
     [
       0,
@@ -173,37 +173,37 @@
     {
       "x": 0,
       "y": -20,
-      "role": "generic"
+      "role": "skill"
     },
     {
       "x": -70,
       "y": -30,
-      "role": "generic"
+      "role": "skill"
     },
     {
       "x": 70,
       "y": -30,
-      "role": "generic"
+      "role": "skill"
     },
     {
       "x": -70,
       "y": 40,
-      "role": "generic"
+      "role": "skill"
     },
     {
       "x": 70,
       "y": 40,
-      "role": "generic"
+      "role": "skill"
     },
     {
       "x": -40,
       "y": 90,
-      "role": "generic"
+      "role": "skill"
     },
     {
       "x": 40,
       "y": 90,
-      "role": "generic"
+      "role": "skill"
     }
   ]
 }

@@ -17,8 +17,11 @@ namespace AsteroidsGame.Gameplay;
 public static class AsteroidPrefab
 {
     /// <summary>Spawns the asteroid and returns its entity (default if the type/material was
-    /// invalid). The demo attaches an AsteroidTypeKey to the result for live material tuning.</summary>
-    public static Entity Spawn(World world, GameContext ctx, Random rng, Vector2 pos, string typeKey, float sizeMult)
+    /// invalid). The demo attaches an AsteroidTypeKey to the result for live material tuning.
+    /// <paramref name="aimDir"/> overrides the default inward-±45° entry direction (wave spawn
+    /// patterns aim their bodies); <paramref name="speedMult"/> scales the sampled entry speed.</summary>
+    public static Entity Spawn(World world, GameContext ctx, Random rng, Vector2 pos, string typeKey, float sizeMult,
+                               Vector2? aimDir = null, float speedMult = 1f)
     {
         if (!ctx.Config.Asteroids.TryGetValue(typeKey, out var ac) || ac.Procedural == null) return default;
         if (!ctx.Config.Materials.TryGetValue(ac.Material, out var mc))
@@ -31,13 +34,21 @@ public static class AsteroidPrefab
 
         var body = BuildProceduralAsteroid(ac.Procedural, sizeMult, mat, rng);
 
-        var wc = ctx.Config.World;
-        Vector2 worldCenter = new(wc.Width / 2f, wc.Height / 2f);
-        Vector2 toCenter    = worldCenter - pos;
-        float   baseAngle   = MathF.Atan2(toCenter.Y, toCenter.X);
-        float   spread      = ((float)rng.NextDouble() * 2f - 1f) * (MathF.PI / 4f);
-        float   speed       = ac.SpeedRange[0] + (float)rng.NextDouble() * (ac.SpeedRange[1] - ac.SpeedRange[0]);
-        var vel = new Vector2(MathF.Cos(baseAngle + spread), MathF.Sin(baseAngle + spread)) * speed;
+        float speed = (ac.SpeedRange[0] + (float)rng.NextDouble() * (ac.SpeedRange[1] - ac.SpeedRange[0])) * speedMult;
+        Vector2 dir;
+        if (aimDir is { } ad && ad.LengthSquared() > 1e-6f)
+        {
+            dir = Vector2.Normalize(ad);
+        }
+        else
+        {
+            var wc = ctx.Config.World;
+            Vector2 toCenter  = new Vector2(wc.Width / 2f, wc.Height / 2f) - pos;
+            float   baseAngle = MathF.Atan2(toCenter.Y, toCenter.X);
+            float   spread    = ((float)rng.NextDouble() * 2f - 1f) * (MathF.PI / 4f);
+            dir = new Vector2(MathF.Cos(baseAngle + spread), MathF.Sin(baseAngle + spread));
+        }
+        var vel = dir * speed;
 
         float spinMag = ac.SpinRange[0] + (float)rng.NextDouble() * (ac.SpinRange[1] - ac.SpinRange[0]);
         float spin    = spinMag * (rng.NextDouble() > 0.5 ? 1f : -1f);
@@ -66,6 +77,7 @@ public static class AsteroidPrefab
         "ice"   => new BodyColor { Fill = new Color(70, 115, 155),  Outline = new Color(140, 195, 230) },
         "metal" => new BodyColor { Fill = new Color(50, 60, 75),    Outline = new Color(115, 135, 165) },
         "glass" => new BodyColor { Fill = new Color(60, 120, 95),   Outline = new Color(110, 195, 155) },
+        "sand"  => new BodyColor { Fill = new Color(150, 118, 58),  Outline = new Color(224, 190, 110) },
         _       => new BodyColor { Fill = new Color(64, 58, 52),    Outline = new Color(150, 138, 120) },
     };
 
@@ -116,7 +128,7 @@ public static class AsteroidPrefab
         // Tessellate with uniform bond mults (1); clusters re-weight bonds/cells afterwards.
         var uniform = new float[seeds.Count];
         Array.Fill(uniform, 1f);
-        var body = VoronoiTessellator.BuildWithSeeds(convex, seeds, uniform, membership, mat, rng);
+        var body = VoronoiTessellator.BuildWithSeeds(convex, seeds, uniform, membership, mat, rng, proc.RelaxIterations);
 
         ApplyClusters(body, proc, maxR, mat.Toughness, rng);
         return body;

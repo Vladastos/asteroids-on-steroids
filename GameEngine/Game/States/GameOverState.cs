@@ -13,9 +13,16 @@ public sealed class GameOverState : IGameState
     private static readonly FontSpec Hint = new("monospace", 14f);
     private static readonly Color    Bg   = new(8, 9, 14);
 
+    private bool  _newBest;
+    private float _finalScore;
+
     public GameOverState(GameContext ctx, bool won) { _ctx = ctx; _won = won; }
 
-    public void Enter()  { }
+    public void Enter()
+    {
+        _finalScore = _ctx.Score.Total;
+        _newBest    = _ctx.SubmitScore(_finalScore);   // persists if it beat the record
+    }
     public void Exit()   { }
 
     public IGameState? Update(double dt)
@@ -37,7 +44,11 @@ public sealed class GameOverState : IGameState
         string headline = _won ? "YOU WIN" : "GAME OVER";
         Color headlineC = _won ? new Color(120, 255, 160) : new Color(255, 100, 90);
         r.DrawText(headline,                              new Vector2(cx - 120f, cy - 80f), headlineC, Big);
-        r.DrawText($"Score  {_ctx.Score.Total:F0}",      new Vector2(cx - 80f,  cy - 10f), new Color(220, 230, 255), Med);
+        r.DrawText($"Score  {_finalScore:F0}",           new Vector2(cx - 80f,  cy - 10f), new Color(220, 230, 255), Med);
+        if (_newBest)
+            r.DrawText("NEW BEST!",                       new Vector2(cx - 62f,  cy + 22f), new Color(255, 220, 90), Med);
+        else
+            r.DrawText($"Best  {_ctx.HighScore:F0}",      new Vector2(cx - 72f,  cy + 24f), new Color(150, 165, 195), Hint);
         r.DrawText("SPACE / ENTER for main menu",        new Vector2(cx - 145f, cy + 60f), new Color(80, 100, 130), Hint);
         r.End();
     }

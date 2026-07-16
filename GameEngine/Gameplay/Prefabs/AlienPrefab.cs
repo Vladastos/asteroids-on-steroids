@@ -11,7 +11,10 @@ namespace AsteroidsGame.Gameplay;
 /// shared by the game and the demo so both spawn identical aliens.</summary>
 public static class AlienPrefab
 {
-    public static void Spawn(World world, GameContext ctx, Random rng, Vector2 pos, string typeKey)
+    /// <summary><paramref name="aimDir"/> overrides the default inward-±30° entry direction (wave
+    /// spawn patterns aim their bodies); <paramref name="speedMult"/> scales the entry speed.</summary>
+    public static void Spawn(World world, GameContext ctx, Random rng, Vector2 pos, string typeKey,
+                             Vector2? aimDir = null, float speedMult = 1f)
     {
         if (!ctx.Config.Entities.TryGetValue(typeKey, out var ec)) return;
         if (!ctx.Shapes.TryGetValue(ec.Shape, out var sd)) return;
@@ -24,20 +27,37 @@ public static class AlienPrefab
         var body      = VoronoiTessellator.BuildFromExplicitSeeds(outline, seedPos, seedMult, mat, rng);
         FractureBodyFactory.ApplyShapeSeeds(body, sd.Seeds, sc);
 
-        var wc = ctx.Config.World;
-        Vector2 worldCenter = new(wc.Width / 2f, wc.Height / 2f);
-        Vector2 toCenter    = worldCenter - pos;
-        float baseAngle     = MathF.Atan2(toCenter.Y, toCenter.X);
-        float spread        = ((float)rng.NextDouble() * 2f - 1f) * (MathF.PI / 6f);
-        float speed         = ec.Speed * (0.7f + 0.6f * (float)rng.NextDouble());
-        Vector2 vel         = new Vector2(MathF.Cos(baseAngle + spread), MathF.Sin(baseAngle + spread)) * speed;
+        float speed = ec.Speed * (0.7f + 0.6f * (float)rng.NextDouble()) * speedMult;
+        Vector2 dir;
+        if (aimDir is { } ad && ad.LengthSquared() > 1e-6f)
+        {
+            dir = Vector2.Normalize(ad);
+        }
+        else
+        {
+            var wc = ctx.Config.World;
+            Vector2 toCenter  = new Vector2(wc.Width / 2f, wc.Height / 2f) - pos;
+            float baseAngle   = MathF.Atan2(toCenter.Y, toCenter.X);
+            float spread      = ((float)rng.NextDouble() * 2f - 1f) * (MathF.PI / 6f);
+            dir = new Vector2(MathF.Cos(baseAngle + spread), MathF.Sin(baseAngle + spread));
+        }
+        Vector2 vel = dir * speed;
 
-        var color = new BodyColor { Fill = new Color(80, 50, 120), Outline = new Color(160, 100, 220) };
+        // Faction palette so alien type reads at a glance (role tints layer on top per cell).
+        var color = typeKey switch
+        {
+            "drone"      => new BodyColor { Fill = new Color(40, 120, 120),  Outline = new Color(90, 210, 205) },  // teal
+            "bruiser"    => new BodyColor { Fill = new Color(135, 55, 40),   Outline = new Color(225, 110, 70) },  // red-orange
+            "mothership" => new BodyColor { Fill = new Color(75, 45, 115),   Outline = new Color(155, 100, 215) }, // deep purple
+            _            => new BodyColor { Fill = new Color(80, 50, 120),   Outline = new Color(160, 100, 220) },
+        };
         var e     = FractureBodyFactory.SpawnFromDensity(world, ctx.Config.Physics, body, pos,
                         (float)(rng.NextDouble() * MathF.Tau), vel, 0f, color);
         world.AddComponent(e, new AlienTag());
         world.AddComponent(e, new AlienVariant { Key = typeKey });
         world.AddComponent(e, new ShootCooldown { Remaining = (float)rng.NextDouble() * ec.ShootCooldown });
+        if (ec.Dash is not null)
+            world.AddComponent(e, new AlienSkillState { DashCd = ec.Dash.Cooldown }); // start on cooldown
         world.AddComponent(e, new VortexResponse { CentripetalMult = 0.15f, TangentialMult = 0.08f });
         // Alien layer so player bullets can target aliens but asteroids don't fracture them.
         if (world.HasComponent<Collider>(e))

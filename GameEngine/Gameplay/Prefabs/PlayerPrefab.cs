@@ -88,6 +88,7 @@ public static class PlayerPrefab
             Layer = GameLayers.Player,
             Mask  = GameLayers.Asteroid | GameLayers.Alien,
         });
+        CellColorizer.Apply(body, ShipColor);   // bake per-cell colours (this path bypasses the factory)
         world.AddComponent(player, body);
         world.AddComponent(player, ShipColor);
         var (outlineSeg, cracks) = FractureMesh.ComputeEdges(body.Cells, body.Bonds);

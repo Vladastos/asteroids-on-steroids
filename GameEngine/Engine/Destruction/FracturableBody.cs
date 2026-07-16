@@ -19,4 +19,7 @@ public struct FracturableBody
     public Bond[] Bonds;                    // current adjacency (shrinks as cracks form)
     public FractureProperties Material;
     public FractureState      State;
+    /// <summary>Total area below the material's MinFragmentArea (and not a cockpit body): any fracture
+    /// on it vaporises it whole (one-shot). Set at spawn. Impact/physics on OTHER bodies stay normal.</summary>
+    public bool               Fragile;
 }

@@ -53,10 +53,8 @@ public struct FractureProcess
     public Vector2 ImpactPointWorld;
     public float   Directionality;
 
-    // Pacing (from the material CrackSpeed).
-    public int StepsPerIteration;
-    public int FramesPerIteration;
-    public int FrameCounter;
+    // Pacing lives on each CrackFront (material CrackSpeed × the hit's velocity factor), so every
+    // hit's crack advances on its own clock rather than inheriting the first hit's pace.
 
     public bool Done;            // set on finalise so the system ignores it until the entity is destroyed
 }

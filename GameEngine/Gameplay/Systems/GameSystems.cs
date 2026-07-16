@@ -72,8 +72,15 @@ public sealed class PlayerControlSystem : ISystem
         if (inp.IsPressed(KeyCode.Q) && hasProp && sk.DashCooldown <= 0f
             && skills.TryGetValue("dash", out var dashCfg))
         {
+            // Dash along the held-movement direction, so you can dash sideways to dodge without
+            // rotating; fall back to current travel direction, then aim.
+            Vector2 dashDir = Vector2.Zero;
+            if (inp.IsHeld(KeyCode.W)) dashDir.Y -= 1f; if (inp.IsHeld(KeyCode.S)) dashDir.Y += 1f;
+            if (inp.IsHeld(KeyCode.A)) dashDir.X -= 1f; if (inp.IsHeld(KeyCode.D)) dashDir.X += 1f;
             ref var dashVel = ref world.GetComponent<Velocity>(Player);
-            dashVel.Linear += aim.Dir * (dashCfg.VelocitySpike ?? 1400f);
+            if (dashDir == Vector2.Zero)
+                dashDir = dashVel.Linear.LengthSquared() > 100f ? dashVel.Linear : aim.Dir;
+            dashVel.Linear += Vector2.Normalize(dashDir) * (dashCfg.VelocitySpike ?? 1400f);
             sk.DashActive   = dashCfg.InvincibilityTime ?? 0.35f;
             sk.DashCooldown = dashCfg.Cooldown;
         }
@@ -149,7 +156,10 @@ public sealed class PlayerControlSystem : ISystem
                 float delta        = targetAngle - currentAngle;
                 while (delta >  MathF.PI) delta -= MathF.Tau;
                 while (delta < -MathF.PI) delta += MathF.Tau;
-                float maxTurn  = _ctx.Config.Player.RotSpeed * fdt;
+                float rotSpeed = _ctx.Config.Player.RotSpeed;
+                if (sk.SlowMoActive > 0f && skills.TryGetValue("slowmo", out var smRot))
+                    rotSpeed *= smRot.RotSpeedBoost ?? 1f;   // keep aim snappy while the world crawls
+                float maxTurn  = rotSpeed * fdt;
                 float turn     = MathF.Abs(delta) <= maxTurn ? delta : MathF.Sign(delta) * maxTurn;
                 aim.Dir = new Vector2(MathF.Cos(currentAngle + turn), MathF.Sin(currentAngle + turn));
             }
@@ -239,18 +249,38 @@ public sealed class PlayerControlSystem : ISystem
 
 public sealed class VortexSystem : ISystem
 {
-    private readonly Vector2      _centre;
+    private readonly Vector2      _mapCentre;
+    private readonly float        _worldW, _worldH;
     private readonly VortexConfig _cfg;
     private float _time = 0f;
 
-    public VortexSystem(Vector2 centre, VortexConfig cfg) { _centre = centre; _cfg = cfg; }
+    /// <summary>Current vortex centre (updated each frame). Renderers can read it for the pull visual.</summary>
+    public Vector2 Centre { get; private set; }
+
+    public VortexSystem(Vector2 mapCentre, float worldW, float worldH, VortexConfig cfg)
+    {
+        _mapCentre = mapCentre; _worldW = worldW; _worldH = worldH; _cfg = cfg;
+        Centre = mapCentre;
+    }
 
     public void Update(World world, double dt)
     {
         float fdt = (float)dt;
         _time += fdt;
+
+        // Lissajous orbit around the map centre, with amplitudes clamped so the centre never comes
+        // within BorderMargin of an edge (max reach from centre is half the map minus the margin).
+        float ampX = MathF.Min(MathF.Max(0f, _cfg.MoveAmpX), MathF.Max(0f, _worldW * 0.5f - _cfg.BorderMargin));
+        float ampY = MathF.Min(MathF.Max(0f, _cfg.MoveAmpY), MathF.Max(0f, _worldH * 0.5f - _cfg.BorderMargin));
+        float px   = MathF.Max(0.1f, _cfg.MovePeriodX);
+        float py   = MathF.Max(0.1f, _cfg.MovePeriodY);
+        Vector2 centre = _mapCentre + new Vector2(
+            ampX * MathF.Sin(_time * MathF.Tau / px),
+            ampY * MathF.Sin(_time * MathF.Tau / py + _cfg.MovePhase));
+        Centre = centre;
+
         float centripetalK = MathF.Max(0f, _cfg.Centripetal
-                             + _cfg.VariationCentripetal * MathF.Sin(_time * MathF.Tau / 11f));
+                             + _cfg.VariationCentripetal * MathF.Sin(_time * MathF.Tau / 5f));
         float tangentialK  = MathF.Max(0f, _cfg.Tangential
                              + _cfg.VariationTangential * MathF.Sin(_time * MathF.Tau / 13f + MathF.PI * 0.5f));
         float deadzone  = _cfg.Deadzone;
@@ -259,7 +289,7 @@ public sealed class VortexSystem : ISystem
         world.ForEach<Transform, Velocity, RigidBody, VortexResponse>(
             (Entity _, ref Transform t, ref Velocity v, ref RigidBody _, ref VortexResponse vr) =>
         {
-            Vector2 toCenter = _centre - t.Position;
+            Vector2 toCenter = centre - t.Position;
             float dist = toCenter.Length();
             if (dist < 1e-3f) return;
             float excess = dist - deadzone;
@@ -282,39 +312,127 @@ public sealed class VortexSystem : ISystem
     }
 }
 
-public sealed class BorderDampSystem : ISystem
+/// <summary>
+/// The map-border rim, all config-driven (<see cref="BorderHazardConfig"/>):
+///  • <b>Damp</b> — cancels outward velocity near an edge so nothing leaves the map.
+///  • <b>Push</b> — an inward shove that grows toward the edge, nudging bodies off the walls
+///    (summed per axis, so a corner pushes diagonally toward centre).
+///  • <b>Erosion</b> — after a grace period in the hazard rim, the "storm" rips a body's most
+///    <i>exposed</i> cell every Tick, energy ramping the longer it lingers. Applies to ALL
+///    fracturable bodies (player, aliens, asteroids), so corner-camping is never safe.
+/// </summary>
+public sealed class BorderHazardSystem : ISystem
 {
     private readonly float _worldW, _worldH;
-    private const float Zone  = 200f;
-    private const float DampK = 20f;
+    private readonly BorderHazardConfig _cfg;
+    private readonly Random _rng;
 
-    public BorderDampSystem(float worldW, float worldH) { _worldW = worldW; _worldH = worldH; }
+    private struct Exposure { public float Time; public float TickAcc; }
+    private readonly Dictionary<Entity, Exposure> _exposure = new();
+    private readonly List<(Entity Body, int Cell, Vector2 Point, Vector2 Dir, float Mass)> _erode = new();
+    private readonly List<Entity> _stale = new();
+
+    // Environmental impactor: tight (stays on the exposed face), a little blast, no knockback.
+    private static readonly WeaponProfile StormWeapon = new()
+        { Directionality = 0.9f, BlastFraction = 0.15f, Knockback = 0f };
+
+    public BorderHazardSystem(float worldW, float worldH, BorderHazardConfig cfg, Random rng)
+    { _worldW = worldW; _worldH = worldH; _cfg = cfg; _rng = rng; }
 
     public void Update(World world, double dt)
     {
+        if (!_cfg.Enabled) return;
         float fdt = (float)dt;
+
+        // ── Pass 1: damp outward velocity + inward push (every moving body) ──
+        float dampZone = _cfg.DampZone, dampK = _cfg.DampStrength;
+        float pushZone = _cfg.PushZone, pushK = _cfg.PushStrength;
         world.ForEach<Transform, Velocity>((Entity _, ref Transform t, ref Velocity v) =>
         {
             float x = t.Position.X, y = t.Position.Y;
+            float dL = x, dR = _worldW - x, dT = y, dB = _worldH - y;
 
-            float dL = x;
-            if (dL < Zone && v.Linear.X < 0f)
-                v.Linear.X *= MathF.Exp(-DampK * (1f - dL / Zone) * fdt);
+            if (dampZone > 1f)
+            {
+                if (dL < dampZone && v.Linear.X < 0f) v.Linear.X *= MathF.Exp(-dampK * (1f - dL / dampZone) * fdt);
+                if (dR < dampZone && v.Linear.X > 0f) v.Linear.X *= MathF.Exp(-dampK * (1f - dR / dampZone) * fdt);
+                if (dT < dampZone && v.Linear.Y < 0f) v.Linear.Y *= MathF.Exp(-dampK * (1f - dT / dampZone) * fdt);
+                if (dB < dampZone && v.Linear.Y > 0f) v.Linear.Y *= MathF.Exp(-dampK * (1f - dB / dampZone) * fdt);
+            }
 
-            float dR = _worldW - x;
-            if (dR < Zone && v.Linear.X > 0f)
-                v.Linear.X *= MathF.Exp(-DampK * (1f - dR / Zone) * fdt);
-
-            float dT = y;
-            if (dT < Zone && v.Linear.Y < 0f)
-                v.Linear.Y *= MathF.Exp(-DampK * (1f - dT / Zone) * fdt);
-
-            float dB = _worldH - y;
-            if (dB < Zone && v.Linear.Y > 0f)
-                v.Linear.Y *= MathF.Exp(-DampK * (1f - dB / Zone) * fdt);
+            if (pushZone > 1f && pushK > 0f)
+            {
+                if (dL < pushZone) v.Linear.X += pushK * (1f - dL / pushZone) * fdt;
+                if (dR < pushZone) v.Linear.X -= pushK * (1f - dR / pushZone) * fdt;
+                if (dT < pushZone) v.Linear.Y += pushK * (1f - dT / pushZone) * fdt;
+                if (dB < pushZone) v.Linear.Y -= pushK * (1f - dB / pushZone) * fdt;
+            }
 
             t.Position = Vector2.Clamp(t.Position, Vector2.Zero, new Vector2(_worldW, _worldH));
         });
+
+        // ── Pass 2: erosion exposure over fracturable bodies ──
+        float hz = _cfg.HazardZone;
+        _erode.Clear();
+        world.ForEach<Transform, FracturableBody>((Entity e, ref Transform t, ref FracturableBody fb) =>
+        {
+            float x = t.Position.X, y = t.Position.Y;
+            // margin past each inner boundary (>0 = inside that rim); depth = deepest one
+            float mL = hz - x, mR = hz - (_worldW - x), mT = hz - y, mB = hz - (_worldH - y);
+            float depth = MathF.Max(MathF.Max(mL, mR), MathF.Max(mT, mB));
+
+            _exposure.TryGetValue(e, out var ex);
+            if (depth > 0f)
+            {
+                ex.Time += fdt;
+                if (ex.Time > _cfg.Grace)
+                {
+                    ex.TickAcc += fdt;
+                    if (ex.TickAcc >= _cfg.Tick && fb.Cells.Length > 0)
+                    {
+                        ex.TickAcc = 0f;
+                        // outward normal of the nearest border
+                        Vector2 n = (mL >= mR && mL >= mT && mL >= mB) ? new Vector2(-1f, 0f)
+                                  : (mR >= mT && mR >= mB)             ? new Vector2( 1f, 0f)
+                                  : (mT >= mB)                         ? new Vector2( 0f,-1f)
+                                  :                                      new Vector2( 0f, 1f);
+                        // most-exposed cell = furthest along the outward normal (world space)
+                        float c = MathF.Cos(t.Rotation), s = MathF.Sin(t.Rotation);
+                        int best = 0; float bestProj = float.NegativeInfinity; Vector2 bestW = t.Position;
+                        for (int i = 0; i < fb.Cells.Length; i++)
+                        {
+                            var cc = fb.Cells[i].Centroid;
+                            Vector2 w = new(cc.X * c - cc.Y * s + t.Position.X, cc.X * s + cc.Y * c + t.Position.Y);
+                            float proj = Vector2.Dot(w, n);
+                            if (proj > bestProj) { bestProj = proj; best = i; bestW = w; }
+                        }
+                        float extra = ex.Time - _cfg.Grace;
+                        float mass  = _cfg.BaseMass * (1f + _cfg.Ramp * extra);
+                        _erode.Add((e, best, bestW, -n, mass));   // fracture inward, on the exposed face
+                    }
+                }
+            }
+            else
+            {
+                ex.Time    = MathF.Max(0f, ex.Time - fdt * _cfg.DecayRate);
+                ex.TickAcc = 0f;
+            }
+
+            if (ex.Time <= 0f) _exposure.Remove(e);
+            else               _exposure[e] = ex;
+        });
+
+        // Apply erosion after iteration (BeginFracture adds a FractureProcess component).
+        foreach (var (body, cell, point, dir, mass) in _erode)
+            FractureService.BeginFracture(world, body, cell, point, dir, _cfg.ImpactSpeed, mass, StormWeapon, _rng);
+
+        // Forget bodies that died so the dictionary can't grow unbounded on entity recycle.
+        if (_exposure.Count > 0)
+        {
+            _stale.Clear();
+            foreach (var kv in _exposure) if (!world.IsAlive(kv.Key)) _stale.Add(kv.Key);
+            foreach (var k in _stale) _exposure.Remove(k);
+        }
     }
 }
 
@@ -337,6 +455,14 @@ public sealed class GhostSystem : ISystem
                 {
                     c.Layer = GameLayers.Alien;
                     c.Mask  = GameLayers.Asteroid | GameLayers.Player | GameLayers.Alien;
+                }
+                else if (world.HasComponent<PiercingRoundTag>(e))
+                {
+                    // A piercing shard: bullet layer like the round it came from (it's a sensor,
+                    // so it passes through; the layer just decides what it pierces). Ghost included
+                    // so shards keep biting fragments of a still-splitting target.
+                    c.Layer = GameLayers.Bullet;
+                    c.Mask  = GameLayers.Asteroid | GameLayers.Alien | GameLayers.Ghost;
                 }
                 else
                 {
@@ -387,7 +513,7 @@ public sealed class StressRelaxSystem : ISystem
             if (dec <= 0f) return;
             var bonds = fb.Bonds;
             for (int i = 0; i < bonds.Length; i++)
-                if (bonds[i].Stress > 0f)
+                if (!bonds[i].Broken && bonds[i].Stress > 0f)   // broken bonds stay broken — no healing
                     bonds[i].Stress = MathF.Max(0f, bonds[i].Stress - dec);
             var cells = fb.Cells;
             for (int i = 0; i < cells.Length; i++)
@@ -460,7 +586,11 @@ public sealed class RaycastBulletSystem : ISystem
                 Color0 = new Color(255, 235, 130, 200), Color1 = new Color(255, 110, 40, 0),
             });
 
-            int hitMask = GameLayers.Asteroid | GameLayers.Player | GameLayers.Alien;
+            // Ghost = fresh fracture fragments: exempt from PHYSICS for a beat so newborn siblings
+            // don't explode apart, but weapons must still see them — a continuously splitting body
+            // (sand!) re-ghosts its pieces every few frames, and without this bit bullets fly
+            // straight through it unconsumed.
+            int hitMask = GameLayers.Asteroid | GameLayers.Player | GameLayers.Alien | GameLayers.Ghost;
             if (PhysicsQueries.Raycast(world, from, to, hitMask, out var hit))
             {
                 if (inGrace && hit.Entity == owner) continue;   // let the bullet clear its own hull
@@ -481,6 +611,7 @@ public sealed class AlienAiSystem : ISystem
     private Entity   _playerEntity;
     private Vector2  _playerPos;
     private bool     _playerAlive;
+    private float    _time;   // accumulates dt; drives lazy wander headings
 
     // 8-direction context steering offsets.
     private static readonly Vector2[] Dirs8;
@@ -500,6 +631,7 @@ public sealed class AlienAiSystem : ISystem
     public void Update(World world, double dt)
     {
         float fdt = (float)dt;
+        _time += fdt;
 
         // Locate player for this frame.
         _playerAlive  = false;
@@ -529,20 +661,19 @@ public sealed class AlienAiSystem : ISystem
             Vector2 facingDir = new Vector2(MathF.Cos(t.Rotation - MathF.PI * 0.5f),
                                             MathF.Sin(t.Rotation - MathF.PI * 0.5f));
 
-            // Choose thrust direction by alien type.
+            // Engagement: inside AggroRadius the alien actively engages the player; beyond it (or with
+            // no player) it ignores the player and wanders aimlessly. AggroRadius <= 0 = always aggro.
+            float distToPlayer = _playerAlive ? (pos - _playerPos).Length() : float.MaxValue;
+            bool  aggro        = _playerAlive && (cfg.AggroRadius <= 0f || distToPlayer <= cfg.AggroRadius);
+
+            // Choose thrust direction.
             Vector2 thrustDir;
-            if (av.Key == "bruiser")
-            {
-                // Direct pursuit: thrust toward player.
-                thrustDir = _playerAlive ? Vector2.Normalize(_playerPos - pos) : facingDir;
-            }
+            if (!aggro)
+                thrustDir = WanderDir(e.Id);                                   // aimless drift
+            else if (av.Key == "bruiser")
+                thrustDir = Vector2.Normalize(_playerPos - pos);               // ram: straight at the player
             else
-            {
-                // Drone: context steering — interest toward player, danger away from asteroids/bounds.
-                thrustDir = _playerAlive
-                    ? DroneSteering(pos, asteroidPos, cfg)
-                    : facingDir;
-            }
+                thrustDir = DroneSteering(pos, KiteGoal(pos, distToPlayer, cfg), asteroidPos, cfg); // kite
 
             // Bias thrust direction toward ship facing (lateral penalty) then drive via velocity model.
             ApplyLateralPenalty(ref thrustDir, facingDir, cfg.LateralThrustPenaltyMult);
@@ -552,9 +683,10 @@ public sealed class AlienAiSystem : ISystem
                 ref var vel = ref world.GetComponent<Velocity>(e);
 
                 float propFrac = AlivePropellerFraction(world, e);
+                float speedMul = aggro ? 1f : 0.45f;   // wander cruises slower than an engaged pursuit
                 if (propFrac > 0f && thrustDir.LengthSquared() > 1e-6f)
                 {
-                    Vector2 desiredVel = Vector2.Normalize(thrustDir) * (cfg.Speed * propFrac);
+                    Vector2 desiredVel = Vector2.Normalize(thrustDir) * (cfg.Speed * propFrac * speedMul);
                     Vector2 dvDiff     = desiredVel - vel.Linear;
                     float   dvLen      = dvDiff.Length();
                     float   step       = cfg.Thrust * fdt;
@@ -562,31 +694,57 @@ public sealed class AlienAiSystem : ISystem
                         vel.Linear += dvLen <= step ? dvDiff : dvDiff / dvLen * step;
                 }
 
-                if (_playerAlive)
+                // Face the player while engaged. Kinematic turn: drive angular velocity straight at
+                // the bearing (clamped to a max turn rate) so an orbiting drone tracks without the
+                // steady-state lag a damped PD controller leaves — its nose stays on target.
+                if (aggro)
                 {
                     Vector2 targetDir = Vector2.Normalize(_playerPos - pos);
                     float targetAngle = MathF.Atan2(targetDir.Y, targetDir.X) + MathF.PI * 0.5f;
                     float diff        = NormalizeAngle(targetAngle - t.Rotation);
-                    float rotSpeed    = av.Key == "bruiser" ? 2.5f : 4f;
-                    vel.Angular += diff * rotSpeed * fdt;
-                    vel.Angular *= MathF.Exp(-5f * fdt);
+                    float maxTurn     = cfg.TurnSpeed;   // rad/s cap (config-driven)
+                    vel.Angular = Math.Clamp(diff * 12f, -maxTurn, maxTurn);
+                }
+                else
+                {
+                    vel.Angular *= MathF.Exp(-5f * fdt);   // damp residual spin while wandering
+                }
+
+                // ── Skill: dash — a high-cooldown lunge toward the player when close (bruiser ram finisher).
+                if (aggro && cfg.Dash is { } dash && world.HasComponent<AlienSkillState>(e))
+                {
+                    ref var ss = ref world.GetComponent<AlienSkillState>(e);
+                    ss.DashCd = MathF.Max(0f, ss.DashCd - fdt);
+                    // Dash goes along the nose, so only lunge once roughly pointed at the player (~25°),
+                    // otherwise it would charge off in the wrong direction.
+                    bool aimedAtPlayer = distToPlayer > 1f &&
+                        Vector2.Dot(facingDir, Vector2.Normalize(_playerPos - pos)) >= 0.83f;
+                    if (ss.DashCd <= 0f && propFrac > 0f && aimedAtPlayer &&
+                        distToPlayer <= dash.TriggerRange)
+                    {
+                        vel.Linear += facingDir * dash.Speed;   // lunge along the nose, not at the player
+                        ss.DashCd   = dash.Cooldown;
+                    }
                 }
             }
 
-            // Fire when player is in range and cooldown allows.
-            if (!world.HasComponent<ShootCooldown>(e)) return;
+            // Fire only while engaged, in range, and when cooldown allows.
+            if (!aggro || !world.HasComponent<ShootCooldown>(e)) return;
             ref var cd = ref world.GetComponent<ShootCooldown>(e);
             if (cd.Remaining > 0f) { cd.Remaining = MathF.Max(0f, cd.Remaining - fdt); return; }
-            if (!_playerAlive) return;
 
-            float distSq = (pos - _playerPos).LengthSquared();
+            float distSq = distToPlayer * distToPlayer;
             if (distSq > cfg.DetectionRadius * cfg.DetectionRadius) return;
 
             float aliveWeaponFrac = AliveWeaponFraction(world, e);
             if (aliveWeaponFrac <= 0f) return;
 
-            cd.Remaining = cfg.ShootCooldown / MathF.Max(0.01f, aliveWeaponFrac);
-            Vector2 aimDir = Vector2.Normalize(_playerPos - pos);
+            // Hold fire until the nose is pointed at the player (shots go along facing, so an orbiting
+            // drone must be aligned to hit). cd stays ready, so it fires the instant it lines up.
+            if (Vector2.Dot(facingDir, Vector2.Normalize(_playerPos - pos)) < 0.97f) return;
+
+            cd.Remaining = cfg.ShootCooldown * _ctx.Difficulty.EnemyFireMult / MathF.Max(0.01f, aliveWeaponFrac);
+            Vector2 aimDir = facingDir;   // fire along the nose; rotation steers aim toward the player
             toFire.Add((e, av.Key, aimDir, pos + aimDir * 30f));
         });
 
@@ -595,21 +753,42 @@ public sealed class AlienAiSystem : ISystem
             FireAlienWeapon(world, alien, varKey, dir, muzzle);
     }
 
-    private Vector2 DroneSteering(Vector2 pos, List<Vector2> asteroids, EntityConfig cfg)
+    // A slow, lazily-rotating heading per alien (deterministic from id+time) for aimless wandering.
+    private Vector2 WanderDir(int id)
+    {
+        float a = _time * 0.25f + id * 1.3f;
+        return new Vector2(MathF.Cos(a), MathF.Sin(a));
+    }
+
+    // Kiting goal direction: hold PreferredRange from the player — close in when farther, back off
+    // when closer, strafe tangentially when near it. PreferredRange <= 0 = pursue directly.
+    private Vector2 KiteGoal(Vector2 pos, float dist, EntityConfig cfg)
+    {
+        Vector2 toPlayer = _playerPos - pos;
+        float   d        = toPlayer.Length();
+        Vector2 pdir     = d > 1f ? toPlayer / d : Dirs8[0];
+
+        float pref = cfg.PreferredRange;
+        if (pref <= 0f) return pdir;                          // no standoff → pursue
+
+        float band = MathF.Max(40f, pref * 0.15f);
+        if (dist > pref + band) return pdir;                  // too far → approach
+        if (dist < pref - band) return -pdir;                 // too close → back off
+        return new Vector2(-pdir.Y, pdir.X);                  // in the band → strafe (orbit)
+    }
+
+    // Context steering: pursue the supplied goal direction while avoiding asteroids and map borders.
+    private Vector2 DroneSteering(Vector2 pos, Vector2 goalDir, List<Vector2> asteroids, EntityConfig cfg)
     {
         Span<float> interest = stackalloc float[8];
         Span<float> danger   = stackalloc float[8];
-
-        Vector2 toPlayer   = _playerPos - pos;
-        float distToPlayer = toPlayer.Length();
-        Vector2 playerDir  = distToPlayer > 1f ? toPlayer / distToPlayer : Dirs8[0];
 
         float sw = cfg.SteeringWeights?.Pursuit    ?? 1f;
         float av = cfg.SteeringWeights?.Avoidance  ?? 1f;
         float sp = cfg.SteeringWeights?.Separation ?? 1f;
 
         for (int i = 0; i < 8; i++)
-            interest[i] = MathF.Max(0f, Vector2.Dot(Dirs8[i], playerDir)) * sw;
+            interest[i] = MathF.Max(0f, Vector2.Dot(Dirs8[i], goalDir)) * sw;
 
         foreach (var ap in asteroids)
         {
@@ -663,7 +842,8 @@ public sealed class AlienAiSystem : ISystem
             total++;
             if (pulv == null || !pulv[i]) alive++;
         }
-        return total == 0 ? 1f : (float)alive / total;
+        // No propeller cells (e.g. a cockpit-only fragment) → cannot thrust, so it just drifts.
+        return total == 0 ? 0f : (float)alive / total;
     }
 
     private static float AliveWeaponFraction(World world, Entity e)
@@ -730,25 +910,36 @@ public sealed class BlackHoleSystem : ISystem
         if (holes.Count == 0) return;
 
         float fdt = (float)dt;
-        world.ForEach<Transform, Velocity, RigidBody>((Entity _, ref Transform t, ref Velocity v, ref RigidBody rb) =>
+        world.ForEach<Transform, Velocity, RigidBody>((Entity e, ref Transform t, ref Velocity v, ref RigidBody _) =>
         {
+            if (world.HasComponent<MothershpId>(e)) return;   // the boss isn't pulled by its own hole
             foreach (var (hpos, radius, strength) in holes)
             {
                 Vector2 delta = hpos - t.Position;
                 float   dSq   = delta.LengthSquared();
                 if (dSq < 1f || dSq > radius * radius) continue;
                 float dist  = MathF.Sqrt(dSq);
-                float accel = strength / ((dist + 1f) * MathF.Max(rb.Mass, 0.1f));
+                // Gravity accelerates everything equally regardless of mass (÷mass made it ~0 for heavy
+                // asteroids). strength is now an acceleration scale (px/s² at dist≈0).
+                float accel = strength / (dist + 1f);
                 v.Linear += delta / dist * accel * fdt;
             }
         });
     }
 }
 
+/// <summary>Owns grenades: advances their fuse and detonates them on contact (the latter via a
+/// CollisionEvent subscription). Detonation itself (shrapnel spawn) is handled by the
+/// GrenadeDetonateEvent listener in FractureGameplay.</summary>
 public sealed class GrenadeSystem : ISystem
 {
+    private readonly World    _world;
     private readonly EventBus _bus;
-    public GrenadeSystem(EventBus bus) { _bus = bus; }
+    public GrenadeSystem(World world, EventBus bus)
+    {
+        _world = world; _bus = bus;
+        _bus.Subscribe<CollisionEvent>(OnContact);
+    }
 
     public void Update(World world, double dt)
     {
@@ -760,4 +951,171 @@ public sealed class GrenadeSystem : ISystem
                 _bus.Publish(new GrenadeDetonateEvent(e, t.Position, f.WeaponKey));
         });
     }
+
+    // Detonate the moment a grenade contacts anything.
+    private void OnContact(CollisionEvent ev)
+    {
+        Entity g = _world.HasComponent<GrenadeFuse>(ev.EntityA) ? ev.EntityA
+                 : _world.HasComponent<GrenadeFuse>(ev.EntityB) ? ev.EntityB
+                 : default;
+        if (_world.IsAlive(g) && _world.HasComponent<GrenadeFuse>(g))
+            _bus.Publish(new GrenadeDetonateEvent(g, ev.Contact.ContactPoint,
+                                                  _world.GetComponent<GrenadeFuse>(g).WeaponKey));
+    }
+}
+
+/// <summary>
+/// Owns piercing-round impacts as a swept-segment penetration budget. The round carries a LIFETIME
+/// PenetrationPower (set at spawn from its own kinetic energy); each frame we take the cells its
+/// travel actually crossed — in order, entry first — and make it PAY for each one (the cell's
+/// pulverise threshold plus the residual strength of its intact bonds, × PenetrationCostScale).
+/// Damage per cell is its own dial (PierceDamageScale × cost, deposited via DepositEnergy), and
+/// speed fades with the budget (v = v₀·(P/P₀)^PierceSpeedExponent) — tunnel length, collateral and
+/// deceleration tune independently. When a cell costs more than what's left, the round craters the
+/// face it stopped on and SHATTERS there.
+/// </summary>
+public sealed class ProjectileSystem : ISystem
+{
+    private readonly World        _world;
+    private readonly GameContext  _ctx;
+    private readonly EventBus      _bus;
+    private readonly Random        _rng;
+    private readonly Func<Entity>  _player;   // live player (may transfer to a cockpit fragment)
+
+    private readonly List<(int Part, float T, Vector2 Point)> _crossed = new();   // reused per contact
+
+    public ProjectileSystem(World world, GameContext ctx, EventBus bus, Random rng, Func<Entity> player)
+    {
+        _world = world; _ctx = ctx; _bus = bus; _rng = rng; _player = player;
+        _bus.Subscribe<CollisionEvent>(OnContact);
+    }
+
+    public void Update(World world, double dt) { }   // impact-driven; nothing per-frame yet
+
+    private void OnContact(CollisionEvent ev)
+    {
+        Entity eA = ev.EntityA, eB = ev.EntityB;
+        if (!_world.IsAlive(eA) || !_world.IsAlive(eB)) return;
+
+        Entity piercing = _world.HasComponent<PiercingRoundTag>(eA) ? eA
+                        : _world.HasComponent<PiercingRoundTag>(eB) ? eB : default;
+        if (!_world.IsAlive(piercing)) return;
+        Entity target = piercing == eA ? eB : eA;
+        if (!_world.IsAlive(target) || !_world.HasComponent<FracturableBody>(target)) return;
+        if (!_ctx.Config.Weapons.TryGetValue("piercing", out var pcfg)) return;
+        if (!_world.HasComponent<Transform>(piercing) || !_world.HasComponent<Velocity>(piercing)) return;
+        if (!_world.HasComponent<Transform>(target)   || !_world.HasComponent<Collider>(target)) return;
+        if (_world.GetComponent<Collider>(target).Shape is not CompoundShape shape) return;
+
+        ref var pt = ref _world.GetComponent<PiercingRoundTag>(piercing);
+        var ptr = _world.GetComponent<Transform>(piercing);
+        var ttr = _world.GetComponent<Transform>(target);
+
+        // Every cell this frame's travel actually crossed, entry first — not one guessed cell per
+        // contact, which is what left whole slabs on the line of penetration untouched.
+        shape.SegmentParts(ttr.Position, ttr.Rotation, ptr.PreviousPosition, ptr.Position, _crossed);
+        if (_crossed.Count == 0) return;
+
+        float roundMass  = _world.HasComponent<RigidBody>(piercing) ? _world.GetComponent<RigidBody>(piercing).Mass : 1f;
+        float targetMass = _world.HasComponent<RigidBody>(target)   ? _world.GetComponent<RigidBody>(target).Mass   : 1f;
+
+        // Penetration speed = closing speed along the round's own axis. (The contact normal is a cell
+        // FACE normal, often near-perpendicular to travel, so ev.ApproachSpeed is the wrong quantity
+        // for a body tunnelling through rather than bouncing off.)
+        Vector2 relVel = _world.GetComponent<Velocity>(piercing).Linear
+                       - (_world.HasComponent<Velocity>(target) ? _world.GetComponent<Velocity>(target).Linear : Vector2.Zero);
+        float speed = MathF.Abs(Vector2.Dot(relVel, pt.Direction));
+        if (speed < 1e-3f) return;
+
+        var pProfile    = pcfg.ToWeaponProfile();
+        float costScale = pcfg.PenetrationCostScale ?? 1f;
+        float dmgScale  = pcfg.PierceDamageScale ?? 1f;
+        float dmgMult   = target == _player() ? dmgScale * _ctx.PlayerImpactCoeff : dmgScale;
+
+        ref var fb = ref _world.GetComponent<FracturableBody>(target);
+
+        float p0 = pt.Power;   // budget entering this frame's walk (for the speed fade)
+
+        bool stopped = false;
+        Vector2 stopPoint = _crossed[0].Point;
+
+        foreach (var (part, t, point) in _crossed)
+        {
+            // The cell it is already sitting in was paid for on the frame it entered.
+            if (t <= 0f && target == pt.LastTarget && part == pt.LastCell) continue;
+
+            float cost = PenetrationCost(fb, part) * costScale;
+
+            if (pt.Power < cost)
+            {
+                // Can't get through this cell: dump what's left into its face, then shatter on it.
+                stopped   = true;
+                stopPoint = point;
+                FractureService.DepositEnergy(_world, target, part, point, pt.Direction,
+                                              MathF.Max(0f, pt.Power) * dmgMult, pProfile, speed);
+                pt.Power = 0f;
+                pt.LastTarget = target; pt.LastCell = part;
+                break;
+            }
+
+            // Pay for it and crack it. Damage is metered independently of the budget (PierceDamageScale):
+            // 1 = just enough to carve the tunnel cell, higher shatters around it, lower leaves a needle.
+            pt.Power -= cost;
+            FractureService.DepositEnergy(_world, target, part, point, pt.Direction,
+                                          cost * dmgMult, pProfile, speed);
+            pt.LastTarget = target; pt.LastCell = part;
+        }
+
+        ref var pv = ref _world.GetComponent<Velocity>(piercing);
+
+        if (stopped)
+        {
+            // Shatters on the surface: the target's mass drives the reciprocal fracture, and the
+            // round's forward motion dies so its shards spray off the face instead of carrying on.
+            FractureService.BeginFracture(_world, piercing, -1, stopPoint, -pt.Direction,
+                                          speed, targetMass, pProfile, _rng);
+            pv.Linear *= StopVelocityRetain;
+        }
+        else if (pt.Power < p0)
+        {
+            // Speed fades with the budget: v = v₀·(P/P₀)^exponent, applied incrementally per walk
+            // (the per-step ratios compose to exactly that power law).
+            float exp     = pcfg.PierceSpeedExponent ?? 0.5f;
+            float k       = MathF.Pow(pt.Power / MathF.Max(1e-3f, p0), exp);
+            float fwdComp = Vector2.Dot(pv.Linear, pt.Direction);
+            float newFwd  = MathF.Max(0f, fwdComp) * k;
+            Vector2 lat   = pv.Linear - pt.Direction * fwdComp;
+            float latLen  = lat.Length();
+            float maxLat  = pt.LateralClamp * newFwd;
+            if (latLen > maxLat && latLen > 1e-4f) lat = lat / latLen * maxLat;
+            pv.Linear = pt.Direction * newFwd + lat;
+        }
+
+        // Nudge the struck body forward — mass-scaled, so heavy asteroids barely move.
+        if (target != _player() && _world.HasComponent<Velocity>(target))
+        {
+            float push = (pcfg.TargetPushCoeff ?? 0f) * roundMass * speed / MathF.Max(1f, targetMass);
+            ref var tv = ref _world.GetComponent<Velocity>(target);
+            tv.Linear += pt.Direction * push;
+        }
+    }
+
+    /// <summary>What a cell charges to be punched through: the energy to pulverise it outright plus
+    /// the strength left in the bonds still holding it to the body.</summary>
+    private static float PenetrationCost(in FracturableBody fb, int cell)
+    {
+        if ((uint)cell >= (uint)fb.Cells.Length) return 0f;
+        var m = fb.Material;
+        float cost = MathF.Max(0f, m.CellToughness * fb.Cells[cell].Area
+                                 * fb.Cells[cell].DensityMult * m.Density - fb.Cells[cell].Damage);
+        for (int i = 0; i < fb.Bonds.Length; i++)
+        {
+            ref var b = ref fb.Bonds[i];
+            if (b.Broken || (b.A != cell && b.B != cell)) continue;
+            cost += MathF.Max(0f, b.Strength - b.Stress);
+        }
+        return cost;
+    }
+
+    private const float StopVelocityRetain = 0.05f;   // forward motion left after a failed pierce
 }

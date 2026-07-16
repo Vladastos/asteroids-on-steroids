@@ -73,26 +73,27 @@ public sealed class FractureCrackSystem : ISystem
             ref var fp = ref world.GetComponent<FractureProcess>(e);
             if (fp.Done) continue;
 
-            if (++fp.FrameCounter < fp.FramesPerIteration) continue;
-            fp.FrameCounter = 0;
-
             ref var body = ref world.GetComponent<FracturableBody>(e);
 
-            // --- advance the fronts, co-propagating through the shared state ---
+            // --- advance the fronts, each on ITS OWN clock, co-propagating through the shared state ---
+            // Pacing is per front (material CrackSpeed × the hit's velocity factor): a fast bullet's
+            // front races across the body while a slow grinding contact's front creeps beside it.
             _pulvScratch.Clear();
-            int steps = fp.StepsPerIteration < 1 ? 1 : fp.StepsPerIteration;
-            for (int s = 0; s < steps; s++)
+            bool advanced = false, waiting = false;
+            foreach (var f in fp.Fronts)
             {
-                bool any = false;
-                foreach (var f in fp.Fronts)
-                {
-                    if (!f.Active) continue;
+                if (!f.Active) continue;
+                if (++f.FrameCounter < f.FramesPerIteration) { waiting = true; continue; }
+                f.FrameCounter = 0;
+                int steps = f.StepsPerIteration < 1 ? 1 : f.StepsPerIteration;
+                for (int s = 0; s < steps && f.Active; s++)
                     FractureKernel.StepFront(f, body.Cells, body.Bonds, fp.Adj, fp.SpinMul,
                                              fp.Broken, fp.Pulverized, fp.FlingE, body.Material, _pulvScratch);
-                    any = true;
-                }
-                if (!any) break;
+                advanced = true;
             }
+            // Nothing stepped but a front is still ticking toward its next iteration → check next frame.
+            // (When no front is active at all we must fall through so the process can finalise.)
+            if (!advanced && waiting) continue;
 
             // --- dust cells that vaporised this iteration ---
             if (_pulvScratch.Count > 0)
@@ -149,7 +150,11 @@ public sealed class FractureCrackSystem : ISystem
             if (!anyPulv)
             {
                 fp.Done = true;
-                world.RemoveComponent<FractureProcess>(e);
+                // Remove NOW, not deferred: this system runs before the event flush, so a hit landing
+                // later in this same frame would otherwise find a still-present, already-Done process,
+                // append its front to it (which this system skips), and then watch the whole process —
+                // front and all — get dropped by FlushDeferred. That shot would do nothing at all.
+                world.RemoveComponentImmediate<FractureProcess>(e);
                 continue;
             }
 

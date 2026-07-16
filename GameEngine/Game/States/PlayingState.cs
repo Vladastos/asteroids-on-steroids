@@ -25,6 +25,7 @@ public sealed class PlayingState : IGameState
     private readonly ParticleEffects _effects;
     private readonly WorldRenderer  _worldRenderer = new();
     private readonly ISystem[]      _systems;
+    private readonly VortexSystem   _vortex;   // held for the environment overlay (pull visual)
     private readonly Camera         _camera;
     private readonly Random         _rng;
 
@@ -41,14 +42,34 @@ public sealed class PlayingState : IGameState
     private float _waveCountdown = 0f;
     private bool  _mothershpSpawned          = false;
     private bool  _mothershpKilled            = false;
+    private bool[] _specialFired              = System.Array.Empty<bool>();
     private int   _mothershpGroupId           = 0;
     private int   _mothershpInitialCockpits   = 3;
     private bool  _pendingGameOver { get => _fracture.PendingGameOver; set => _fracture.PendingGameOver = value; }
-    private float _bossShockwaveCd            = 0f;
-    private float _bossBlackHoleCd            = 0f;
-    private float _bossRamChargeCd            = 0f;
-    private float _bossRamChargeActive        = 0f;
-    private bool  _bossOverdriveTriggered     = false;
+
+    // Game-over overlay: the run ends but the state stays live — the world keeps simulating
+    // underneath while score/timer/waves freeze and the verdict fades in over the playfield.
+    private bool  _gameOverActive;
+    private float _deadTimer;          // seconds since death
+    private bool  _gameOverWon;
+    private bool  _newBest;
+    private float _finalScore;
+    private const float GameOverFadeIn = 1.6f;   // scrim ramp before the headline appears
+    private const float GameOverTextIn = 0.6f;   // headline/hint fade after that
+
+    // Wave / boss announcement banner.
+    private int    _waveNumber;
+    private string _bannerText  = "";
+    private float  _bannerTimer;
+    private float  _bannerMax;
+    private bool   _bannerBoss;
+    private const float WaveBannerTime = 2.2f;
+    private const float BossBannerTime = 4.0f;
+
+    private void ShowBanner(string text, float dur, bool boss = false)
+    {
+        _bannerText = text; _bannerTimer = dur; _bannerMax = dur; _bannerBoss = boss;
+    }
 
 
     private const double FixedDt = 1.0 / 120.0;
@@ -70,32 +91,111 @@ public sealed class PlayingState : IGameState
         _camera = new Camera(ctx.ScreenW, ctx.ScreenH)
         {
             Position = new Vector2(wc.Width / 2f, wc.Height / 2f),
+            ShakeIntensity = ctx.ShakeIntensity,   // from settings
         };
 
         var worldCenter = new Vector2(wc.Width / 2f, wc.Height / 2f);
 
+        // Screen-shake feedback: a jolt when the player is hit, a lighter kick per destroyed cell,
+        // and a solid thump on grenade detonations.
+        _bus.Subscribe<CellPulverizedEvent>(OnPulverizeShake);
+        _bus.Subscribe<GrenadeDetonateEvent>(_ => { _camera.AddTrauma(0.5f); AddHitstop(_ctx.Config.Vfx.HitstopGrenade); });
+
         var pcs = new PlayerControlSystem(ctx, _camera);
         pcs.OnPiercingFire = (from, dir) => PiercingPrefab.Spawn(_world, _ctx, from, dir, _rng);
+        _vortex = new VortexSystem(worldCenter, ctx.Config.World.Width, ctx.Config.World.Height, ctx.Config.Vortex);
         _systems =
         [
             new PreviousStateSystem(),
             pcs,
             new AlienAiSystem(ctx, _bus, _rng),
+            new BossSystem(ctx, _effects, _camera, _rng, () => _fracture.Player),
             new PhysicsSystem(),
-            new VortexSystem(worldCenter, ctx.Config.Vortex),
+            _vortex,
             new MovementSystem(),
-            new BorderDampSystem(wc.Width, wc.Height),
+            new BorderHazardSystem(wc.Width, wc.Height, ctx.Config.BorderHazard, _rng),
             new RaycastBulletSystem(_bus, _fx, _rng),
-            new GrenadeSystem(_bus),
+            new GrenadeSystem(_world, _bus),
+            new ProjectileSystem(_world, ctx, _bus, _rng, () => _fracture.Player),
             new BlackHoleSystem(),
             new GhostSystem(),
             new CollisionSystem(new SpatialGrid(160f), _bus) { ResolveOverlap = true, EnableSleeping = false },
+            // Flush the frame's IMPACTS (bullet / collision / piercing / grenade) BEFORE the crack
+            // system, so every hit seeds its front on a live body and is advanced this same frame.
+            // Flushed afterwards, a hit landing on the frame its target split or finalised would be
+            // handed a body already marked Done and destined for destruction — and simply vanish.
+            new EventFlushSystem(_bus),
             new FractureCrackSystem(_bus, _rng),
             new FractureGroupSystem(),
             new StressRelaxSystem(),
+            // …then flush the crack system's OUTPUT (pulverise / split / complete) so fragments spawn.
             new EventFlushSystem(_bus),
             new TimeToLiveSystem(),
         ];
+    }
+
+    private void OnPulverizeShake(CellPulverizedEvent ev)
+    {
+        var vfx = _ctx.Config.Vfx;
+        bool isPlayer = _world.IsAlive(_fracture.Player) && ev.Body == _fracture.Player;
+        _camera.AddTrauma(isPlayer ? 0.4f : MathF.Min(0.12f, ev.Area * 0.00015f));
+
+        if (isPlayer) AddHitstop(vfx.HitstopPlayerHit);
+        else if (ev.Area >= vfx.HitstopBigArea) AddHitstop(vfx.HitstopBigFracture);
+
+        // Score popup (aggregated): show the ACTUAL points awarded (FractureGameplay.OnCellPulverized
+        // runs first for this event and records it), so popups scale with cellScoreAreaWeight + combo.
+        if (!isPlayer && _world.IsAlive(ev.Body) && _world.HasComponent<FracturableBody>(ev.Body))
+            QueueScorePopup(_ctx.Score.LastAward, ev.WorldCentroid);
+    }
+
+    // Accumulate score into a single popup so rapid hits merge instead of spamming per-cell numbers.
+    private void QueueScorePopup(float value, Vector2 pos)
+    {
+        if (value <= 0f) return;
+        _popPos   = _popAccum > 0f ? (_popPos * _popAccum + pos * value) / (_popAccum + value) : pos;
+        _popAccum += value;
+        _popTimer = _ctx.Config.Vfx.PopupFlushWindow;
+        if (_popAccum >= _ctx.Config.Vfx.PopupMinValue) FlushPopup();
+    }
+
+    private void FlushPopup()
+    {
+        if (_popAccum <= 0f) return;
+        var vfx = _ctx.Config.Vfx;
+        float t    = Math.Clamp(_popAccum / MathF.Max(1f, vfx.PopupRefValue), 0f, 1f);
+        float size = vfx.PopupMinSize + (vfx.PopupMaxSize - vfx.PopupMinSize) * t;
+        float ttl  = vfx.PopupTtl * (0.8f + 0.6f * t);
+        _popups.Add(new Popup { Pos = _popPos, Value = _popAccum, Remaining = ttl, MaxTtl = ttl, Size = size });
+        _popAccum = 0f; _popTimer = 0f;
+    }
+
+    private void UpdatePopups(float dt)
+    {
+        if (_popAccum > 0f) { _popTimer -= dt; if (_popTimer <= 0f) FlushPopup(); }
+        float rise = _ctx.Config.Vfx.PopupRiseSpeed;
+        for (int i = _popups.Count - 1; i >= 0; i--)
+        {
+            var p = _popups[i];
+            p.Remaining -= dt;
+            p.Pos.Y     -= rise * dt;
+            if (p.Remaining <= 0f) _popups.RemoveAt(i);
+            else _popups[i] = p;
+        }
+    }
+
+    private void DrawPopups(IRenderer r)
+    {
+        foreach (var p in _popups)
+        {
+            float k = Math.Clamp(p.Remaining / MathF.Max(0.01f, p.MaxTtl), 0f, 1f);
+            var col = new Color(255, 230, 130, (byte)(230 * k));
+            var font = new FontSpec("monospace", p.Size, bold: true);
+            string s = $"+{p.Value:F0}";
+            Vector2 screen = _camera.WorldToScreen(p.Pos);
+            Vector2 half   = r.MeasureText(s, font) * 0.5f;
+            r.DrawText(s, screen - half, col, font);
+        }
     }
 
     // ── IGameState ────────────────────────────────────────────────────────────
@@ -113,14 +213,19 @@ public sealed class PlayingState : IGameState
         _mothershpGroupId         = 0;
         _mothershpInitialCockpits = 3;
         _pendingGameOver          = false;
-        _bossShockwaveCd          = 0f;
-        _bossBlackHoleCd          = 0f;
-        _bossRamChargeCd          = 0f;
-        _bossRamChargeActive      = 0f;
-        _bossOverdriveTriggered   = false;
+        _waveNumber               = 0;
+        _bannerTimer              = 0f;
+        _gameOverActive           = false;
+        _deadTimer                = 0f;
+        _gameOverWon              = false;
+        _newBest                  = false;
+        _finalScore               = 0f;
+        _specialFired             = new bool[_ctx.Config.WaveSystem.SpecialWaves.Count];
+        _spawnQueue.Clear();
 
         SpawnPlayer();
         SpawnNextWave();
+        DrainSpawnQueue();   // first wave's due-now bodies appear immediately
     }
 
     public void Exit()
@@ -130,6 +235,36 @@ public sealed class PlayingState : IGameState
 
     public IGameState? Update(double dt)
     {
+        var input = _ctx.Input;
+
+        // Pause menu (Esc toggles). While paused the simulation is frozen; the menu navigates itself.
+        if (input.ConsumePress(KeyCode.Escape)) { _paused = !_paused; _pauseSel = 0; }
+        if (_paused)
+        {
+            if (input.ConsumePress(KeyCode.Up)   || input.ConsumePress(KeyCode.W)) _pauseSel = (_pauseSel + PauseOpts.Length - 1) % PauseOpts.Length;
+            if (input.ConsumePress(KeyCode.Down) || input.ConsumePress(KeyCode.S)) _pauseSel = (_pauseSel + 1) % PauseOpts.Length;
+            if (input.ConsumePress(KeyCode.Enter) || input.ConsumePress(KeyCode.Space))
+            {
+                switch (_pauseSel)
+                {
+                    case 0: _paused = false; break;
+                    case 1: return new PlayingState(_ctx);                  // restart
+                    case 2: return new MainMenuState(_ctx);                 // to main menu
+                }
+            }
+            return null;   // frozen
+        }
+
+        // Hitstop: freeze the simulation for a brief, punchy beat on big impacts; keep shake + popups
+        // ticking so the frozen frame still reads as alive.
+        if (_hitstop > 0f)
+        {
+            _hitstop -= (float)dt;
+            _camera.UpdateShake((float)dt);
+            UpdatePopups((float)dt);
+            return null;
+        }
+
         // Slow-mo scales game simulation dt; input is polled before Update so key presses
         // still happen at wall-clock rate regardless of the scaled dt.
         double gameDt = dt;
@@ -142,13 +277,30 @@ public sealed class PlayingState : IGameState
 
         foreach (var s in _systems)
         {
-            if (s is PlayerControlSystem pcs) pcs.Player = _player;
+            // Once the run is over the hulk just drifts — no more steering, thrust or firing.
+            if (s is PlayerControlSystem pcs)
+            {
+                if (_gameOverActive) continue;
+                pcs.Player = _player;
+            }
             s.Update(_world, gameDt);
         }
         _world.FlushDeferred();
         _fx.Update((float)gameDt);
 
-        _ctx.Score.Update(dt, _ctx.Config.Scoring.KillChainDecay);
+        // Death ends the run but not the state: from here the world keeps simulating while the
+        // score, the clock and the wave director are frozen and the verdict fades in over the field.
+        if (!_gameOverActive && (_pendingGameOver || !_world.IsAlive(_player)))
+        {
+            _gameOverActive  = true;
+            _deadTimer       = 0f;
+            _gameOverWon     = _mothershpKilled;
+            _finalScore      = _ctx.Score.Total;
+            _newBest         = _ctx.SubmitScore(_finalScore);   // persists if it beat the record
+            _ctx.Score.Frozen = true;                           // no further awards or chain decay
+        }
+
+        if (!_gameOverActive) _ctx.Score.Update(dt, _ctx.Config.Scoring.KillChainDecay);
 
         // Camera smooth-follow the player, clamped to world bounds.
         if (_world.IsAlive(_player) && _world.HasComponent<Transform>(_player))
@@ -162,10 +314,29 @@ public sealed class PlayingState : IGameState
             float k = 1f - MathF.Exp(-wc.CameraFollowSpeed * (float)dt);
             _camera.Position += (target - _camera.Position) * k;
         }
+        _camera.UpdateShake((float)dt);
+        UpdatePopups((float)dt);
+        if (_bannerTimer > 0f) _bannerTimer -= (float)dt;
+
+        // Run over: clock/waves stay frozen; only the overlay ticks. Leave once it's fully up.
+        if (_gameOverActive)
+        {
+            _deadTimer += (float)dt;
+            if (_deadTimer >= GameOverFadeIn &&
+                (input.ConsumePress(KeyCode.Space) || input.ConsumePress(KeyCode.Enter)))
+            {
+                _ctx.Score.Reset();
+                _ctx.CellBudget.Reset();
+                return new MainMenuState(_ctx);
+            }
+            return null;
+        }
 
         // Wave manager
         _gameTime  += (float)dt;
         _waveTimer += (float)dt;
+
+        DrainSpawnQueue();   // release queued wave bodies whose time has come (SpawnDuration trickle)
 
         var ws = _ctx.Config.WaveSystem;
         int liveCells    = CountLiveCells();
@@ -191,18 +362,28 @@ public sealed class PlayingState : IGameState
             }
         }
 
+        // Special scripted waves (one-shot time gates, own weights/budget/banner).
+        for (int i = 0; i < ws.SpecialWaves.Count && i < _specialFired.Length; i++)
+        {
+            if (_specialFired[i] || _gameTime < ws.SpecialWaves[i].TriggerTime) continue;
+            _specialFired[i] = true;
+            FireSpecialWave(ws.SpecialWaves[i]);
+        }
+
         // Mothership spawn (one-shot time gate)
         if (!_mothershpSpawned && _gameTime >= ws.MothershpSpawnTime)
         {
             SpawnMothership();
             _mothershpSpawned = true;
         }
-        // Boss skills + win condition
+        // Win when no cockpit-bearing boss fragment remains (BossSystem drives skills/movement now).
         if (_mothershpSpawned && !_mothershpKilled)
-            UpdateBossSkills((float)gameDt);
+        {
+            bool anyBoss = false;
+            _world.ForEach<BossBrain>((Entity _, ref BossBrain _) => anyBoss = true);
+            if (!anyBoss) _mothershpKilled = true;
+        }
 
-        if (!_world.IsAlive(_player)) _pendingGameOver = true;
-        if (_pendingGameOver) return new GameOverState(_ctx, won: _mothershpKilled);
         return null;
     }
 
@@ -210,8 +391,41 @@ public sealed class PlayingState : IGameState
     {
         r.Begin(new Color(8, 9, 14));
         _worldRenderer.Draw(r, _world, _camera, _fx, _player, _ctx.Config.Vfx, alpha);
+        _worldRenderer.DrawEnvironment(r, _camera, _vortex.Centre,
+            _ctx.Config.World.Width, _ctx.Config.World.Height, _ctx.Config.BorderHazard, _gameTime);
+        DrawPopups(r);
+        DrawBanner(r);
         DrawHud(r);
+        if (_gameOverActive) DrawGameOverOverlay(r);
+        if (_paused) DrawPauseMenu(r);
         r.End();
+    }
+
+    /// <summary>The game-over verdict, drawn over a still-running playfield: a scrim that darkens
+    /// as the death sinks in, then the headline/score fading in once it has settled.</summary>
+    private void DrawGameOverOverlay(IRenderer r)
+    {
+        float scrim = Math.Clamp(_deadTimer / GameOverFadeIn, 0f, 1f);
+        FillRect(r, 0f, 0f, _ctx.ScreenW, _ctx.ScreenH, new Color(6, 8, 12, (byte)(150 * scrim)));
+
+        float txt = Math.Clamp((_deadTimer - GameOverFadeIn) / GameOverTextIn, 0f, 1f);
+        if (txt <= 0f) return;
+
+        float cx = _ctx.ScreenW / 2f, cy = _ctx.ScreenH / 2f;
+        byte a = (byte)(255 * txt);
+        var big  = new FontSpec("monospace", 48f);
+        var med  = new FontSpec("monospace", 22f);
+        var hint = new FontSpec("monospace", 14f);
+
+        string headline = _gameOverWon ? "YOU WIN" : "GAME OVER";
+        var headlineC   = _gameOverWon ? new Color(120, 255, 160, a) : new Color(255, 100, 90, a);
+        r.DrawText(headline,                      new Vector2(cx - 120f, cy - 80f), headlineC, big);
+        r.DrawText($"Score  {_finalScore:F0}",    new Vector2(cx - 80f,  cy - 10f), new Color(220, 230, 255, a), med);
+        if (_newBest)
+            r.DrawText("NEW BEST!",               new Vector2(cx - 62f,  cy + 22f), new Color(255, 220, 90, a), med);
+        else
+            r.DrawText($"Best  {_ctx.HighScore:F0}", new Vector2(cx - 72f, cy + 24f), new Color(150, 165, 195, a), hint);
+        r.DrawText("SPACE / ENTER for main menu", new Vector2(cx - 145f, cy + 60f), new Color(120, 140, 175, a), hint);
     }
 
     // ── Wave management ───────────────────────────────────────────────────────
@@ -221,11 +435,12 @@ public sealed class PlayingState : IGameState
         var ws = _ctx.Config.WaveSystem;
         var wc = _ctx.Config.World;
 
-        int budget = ws.BaseBudget
-            + (int)(_gameTime / ws.GrowthIntervalSeconds) * ws.BudgetGrowthPerInterval;
-        int currentCap = Math.Min(
+        var diff = _ctx.Difficulty;
+        int budget = (int)((ws.BaseBudget
+            + (int)(_gameTime / ws.GrowthIntervalSeconds) * ws.BudgetGrowthPerInterval) * diff.BudgetMult);
+        int currentCap = (int)(Math.Min(
             ws.BaseCellCap + (int)(_gameTime / ws.GrowthIntervalSeconds) * ws.CellCapGrowthAmount,
-            ws.MaxCellCap);
+            ws.MaxCellCap) * diff.CapMult);
         float sizeBias = ws.SizeBiasRampEnd > 0f
             ? ws.SizeBiasStart + (ws.SizeBiasEnd - ws.SizeBiasStart)
               * Math.Clamp(_gameTime / ws.SizeBiasRampEnd, 0f, 1f)
@@ -235,100 +450,278 @@ public sealed class PlayingState : IGameState
         float cellCap = MathF.Max(0f, currentCap - liveCells);
         if (cellCap < 3f) return;
 
-        // Evaluate time-parametric bias weights for this moment in the game.
-        var asteroidBias = new Dictionary<string, float>();
-        var alienBias    = new Dictionary<string, float>();
+        _waveNumber++;
+        ShowBanner($"WAVE {_waveNumber}", WaveBannerTime);
+
+        // One combined weighted pool of spawnables (asteroids AND aliens), time-lerped from SpawnBias.
+        var bias = new Dictionary<string, float>();
         foreach (var (key, entry) in ws.SpawnBias)
         {
             float t01 = entry.T1 > entry.T0
                 ? Math.Clamp((_gameTime - entry.T0) / (entry.T1 - entry.T0), 0f, 1f)
                 : (_gameTime >= entry.T0 ? 1f : 0f);
             float w = entry.W0 + (entry.W1 - entry.W0) * t01;
-            if (w <= 0f) continue;
-            if (_ctx.Config.Asteroids.ContainsKey(key))  asteroidBias[key] = w;
-            else if (_ctx.Config.Entities.ContainsKey(key)) alienBias[key]  = w;
+            if (w > 0f && (_ctx.Config.Asteroids.ContainsKey(key) || _ctx.Config.Entities.ContainsKey(key)))
+                bias[key] = w;
         }
 
-        var asteroidSpawns = ChooseAsteroids(budget, asteroidBias, sizeBias, cellCap);
+        var spawns = ChooseSpawns(budget, bias, sizeBias, cellCap);
+        EnqueueWave(spawns, ws.Pattern);
+    }
 
-        // Alien budget allocation: sample one alien per wave from alien bias if any are unlocked.
-        var alienSpawns = new List<string>();
-        if (alienBias.Count > 0)
-        {
-            float total = alienBias.Values.Sum();
-            float pick  = (float)_rng.NextDouble() * total;
-            float cum   = 0f;
-            string chosen = alienBias.Keys.First();
-            foreach (var (k, w) in alienBias) { cum += w; if (pick <= cum) { chosen = k; break; } }
-            if (_ctx.Config.Entities.TryGetValue(chosen, out var ecfg))
-            {
-                int alienCount = Math.Clamp((int)(budget / MathF.Max(1f, ecfg.BaseCost)), 1, 3);
-                for (int i = 0; i < alienCount; i++) alienSpawns.Add(chosen);
-            }
-        }
+    private void FireSpecialWave(SpecialWaveConfig sw)
+    {
+        var bias = new Dictionary<string, float>();
+        foreach (var (k, w) in sw.Weights)
+            if (w > 0f && (_ctx.Config.Asteroids.ContainsKey(k) || _ctx.Config.Entities.ContainsKey(k)))
+                bias[k] = w;
+        EnqueueWave(ChooseSpawns(sw.Budget, bias, sw.SizeBias, sw.CellCap),
+                    sw.Pattern ?? _ctx.Config.WaveSystem.Pattern);
+        ShowBanner(sw.Banner, BossBannerTime, boss: true);
+    }
 
-        Vector2 playerPos = _world.IsAlive(_player) && _world.HasComponent<Transform>(_player)
+    private Vector2 WavePlayerPos()
+    {
+        var wc = _ctx.Config.World;
+        return _world.IsAlive(_player) && _world.HasComponent<Transform>(_player)
             ? _world.GetComponent<Transform>(_player).Position
             : new Vector2(wc.Width / 2f, wc.Height / 2f);
+    }
 
-        var placed = new List<(Vector2 pos, float r)>();
-        foreach (var (key, sizeMult) in asteroidSpawns)
+    // ── Spawn patterns: each wave is a PLAN (shape + aim + timing) and a queue of releases ──────
+    // Bodies are enqueued at wave start and released spread across the pattern's SpawnDuration;
+    // positions and aim are resolved at RELEASE time, so "atPlayer" tracks the live player and
+    // overlap rejection sees the world as it is then, not as it was when the wave fired.
+
+    private enum PatternKind { Scattered, Burst, Wall, Pincer }
+    private enum AimKind     { Inward, AtPlayer, Random, Fixed }
+
+    private sealed class SpawnPlan
+    {
+        public PatternKind Pattern;
+        public AimKind     Aim;
+        public float FixedAngleRad;
+        public int   Side;         // 0 top · 1 bottom · 2 left · 3 right (chosen once per wave)
+        public float AnchorT;      // 0..1 along the side (burst anchor / wall centre)
+        public float BurstRadius, Spread, SpeedMult, AimJitter;
+        public int   Counter;      // pincer: alternates the side per release
+    }
+
+    private struct QueuedSpawn
+    {
+        public float Due; public bool IsAlien; public string Key; public float SizeMult; public SpawnPlan Plan;
+    }
+
+    private readonly List<QueuedSpawn> _spawnQueue = new();
+    private readonly List<(Vector2 pos, float r)> _frameSpawned = new();   // per-frame overlap scratch
+
+    private void EnqueueWave(List<(bool IsAlien, string Key, float SizeMult)> spawns, SpawnPatternConfig pc)
+    {
+        if (spawns.Count == 0) return;
+        var plan = new SpawnPlan
         {
-            float r = _ctx.Config.Asteroids.TryGetValue(key, out var ac) && ac.Procedural != null
-                ? ac.Procedural.BaseRadius * sizeMult : 80f * sizeMult;
-            Vector2 pos = FindSpawnPosition(r, placed, playerPos);
-            placed.Add((pos, r));
-            SpawnAsteroid(pos, key, sizeMult);
-        }
-        foreach (var key in alienSpawns)
+            Pattern = pc.Pattern?.ToLowerInvariant() switch
+            {
+                "burst" => PatternKind.Burst,
+                "wall" => PatternKind.Wall,
+                "pincer" => PatternKind.Pincer,
+                _ => PatternKind.Scattered,
+            },
+            Aim = pc.Direction?.ToLowerInvariant() switch
+            {
+                "atplayer" => AimKind.AtPlayer,
+                "random" => AimKind.Random,
+                "fixed" => AimKind.Fixed,
+                _ => AimKind.Inward,
+            },
+            FixedAngleRad = pc.FixedAngle * MathF.PI / 180f,
+            Side          = _rng.Next(4),
+            AnchorT       = 0.2f + (float)_rng.NextDouble() * 0.6f,   // keep anchors off the corners
+            BurstRadius   = MathF.Max(40f, pc.BurstRadius),
+            Spread        = Math.Clamp(pc.Spread, 0.05f, 1f),
+            SpeedMult     = MathF.Max(0.05f, pc.SpeedMult),
+            AimJitter     = MathF.Max(0f, pc.AimJitter),
+        };
+
+        float dur = MathF.Max(0f, pc.SpawnDuration);
+        for (int i = 0; i < spawns.Count; i++)
         {
-            Vector2 pos = FindSpawnPosition(80f, placed, playerPos);
-            placed.Add((pos, 80f));
-            SpawnAlien(pos, key);
+            float due = spawns.Count > 1 ? _gameTime + dur * i / (spawns.Count - 1) : _gameTime;
+            _spawnQueue.Add(new QueuedSpawn
+            {
+                Due = due, IsAlien = spawns[i].IsAlien, Key = spawns[i].Key,
+                SizeMult = spawns[i].SizeMult, Plan = plan,
+            });
         }
     }
 
-    // Stateless budget-packing: selects (type, sizeMult) pairs until budget or cell cap is exhausted.
-    private List<(string Key, float SizeMult)> ChooseAsteroids(
+    private void DrainSpawnQueue()
+    {
+        if (_spawnQueue.Count == 0) return;
+        Vector2 playerPos = WavePlayerPos();
+        _frameSpawned.Clear();
+
+        for (int i = 0; i < _spawnQueue.Count; )
+        {
+            var q = _spawnQueue[i];
+            if (q.Due > _gameTime) { i++; continue; }
+            _spawnQueue.RemoveAt(i);
+
+            float r = q.IsAlien
+                ? 80f
+                : _ctx.Config.Asteroids.TryGetValue(q.Key, out var ac) && ac.Procedural != null
+                    ? ac.Procedural.BaseRadius * q.SizeMult : 80f * q.SizeMult;
+
+            Vector2 pos = ResolvePatternPosition(q.Plan, r, playerPos);
+            _frameSpawned.Add((pos, r));
+            Vector2 aim = ResolveAim(q.Plan, pos, playerPos);
+
+            if (q.IsAlien) AlienPrefab.Spawn(_world, _ctx, _rng, pos, q.Key, aim, q.Plan.SpeedMult);
+            else           AsteroidPrefab.Spawn(_world, _ctx, _rng, pos, q.Key, q.SizeMult, aim, q.Plan.SpeedMult);
+        }
+    }
+
+    /// <summary>A point in the border strip of a side: t ∈ 0..1 along it, random depth into the strip.</summary>
+    private Vector2 SidePoint(int side, float t)
+    {
+        var wc = _ctx.Config.World;
+        float depth = (float)_rng.NextDouble() * BorderZone;
+        t = Math.Clamp(t, 0f, 1f);
+        return side switch
+        {
+            0 => new Vector2(t * wc.Width, depth),                    // top
+            1 => new Vector2(t * wc.Width, wc.Height - depth),        // bottom
+            2 => new Vector2(depth, t * wc.Height),                   // left
+            _ => new Vector2(wc.Width - depth, t * wc.Height),        // right
+        };
+    }
+
+    private Vector2 ResolvePatternPosition(SpawnPlan plan, float radius, Vector2 playerPos)
+    {
+        if (plan.Pattern == PatternKind.Scattered)
+            return FindSpawnPosition(radius, _frameSpawned, playerPos);
+
+        int side = plan.Pattern == PatternKind.Pincer && (plan.Counter++ & 1) == 1
+            ? OppositeSide(plan.Side) : plan.Side;
+
+        for (int attempt = 0; attempt < 40; attempt++)
+        {
+            Vector2 pos = plan.Pattern switch
+            {
+                PatternKind.Burst => SidePoint(side, plan.AnchorT)
+                    + new Vector2((float)(_rng.NextDouble() * 2 - 1), (float)(_rng.NextDouble() * 2 - 1))
+                    * plan.BurstRadius,
+                // wall / pincer: a slot along the side, spread around the anchor
+                _ => SidePoint(side, plan.AnchorT + ((float)_rng.NextDouble() - 0.5f) * plan.Spread),
+            };
+            var wc = _ctx.Config.World;
+            pos = Vector2.Clamp(pos, new Vector2(radius, radius),
+                                new Vector2(wc.Width - radius, wc.Height - radius));
+            if (SpawnSpotClear(pos, radius, playerPos)) return pos;
+        }
+        // Pattern spot never cleared (crowded corner, viewport…) → classic scattered fallback.
+        return FindSpawnPosition(radius, _frameSpawned, playerPos);
+    }
+
+    private static int OppositeSide(int side) => side switch { 0 => 1, 1 => 0, 2 => 3, _ => 2 };
+
+    /// <summary>The same rejection rules FindSpawnPosition applies, for a caller-chosen spot.</summary>
+    private bool SpawnSpotClear(Vector2 pos, float radius, Vector2 playerPos)
+    {
+        Vector2 sp = _camera.WorldToScreen(pos);
+        if (sp.X > -ViewMargin && sp.X < _ctx.ScreenW + ViewMargin &&
+            sp.Y > -ViewMargin && sp.Y < _ctx.ScreenH + ViewMargin) return false;
+
+        float playerClear = radius + 18f + 150f;
+        if ((pos - playerPos).LengthSquared() < playerClear * playerClear) return false;
+
+        foreach (var (p, r) in _frameSpawned)
+        {
+            float minDist = radius + r + 20f;
+            if ((pos - p).LengthSquared() < minDist * minDist) return false;
+        }
+
+        return !PhysicsQueries.OverlapsCircle(_world, pos, radius + 20f,
+                    GameLayers.Asteroid | GameLayers.Alien | GameLayers.Player);
+    }
+
+    private Vector2 ResolveAim(SpawnPlan plan, Vector2 pos, Vector2 playerPos)
+    {
+        var wc = _ctx.Config.World;
+        Vector2 dir = plan.Aim switch
+        {
+            AimKind.AtPlayer => playerPos - pos,
+            AimKind.Random   => new Vector2(MathF.Cos((float)(_rng.NextDouble() * MathF.Tau)),
+                                            MathF.Sin((float)(_rng.NextDouble() * MathF.Tau))),
+            AimKind.Fixed    => new Vector2(MathF.Cos(plan.FixedAngleRad), MathF.Sin(plan.FixedAngleRad)),
+            _                => new Vector2(wc.Width / 2f, wc.Height / 2f) - pos,   // inward
+        };
+        if (dir.LengthSquared() < 1e-6f) dir = Vector2.UnitX;
+        dir = Vector2.Normalize(dir);
+
+        float jitter = ((float)_rng.NextDouble() * 2f - 1f) * plan.AimJitter;
+        float c = MathF.Cos(jitter), s = MathF.Sin(jitter);
+        return new Vector2(dir.X * c - dir.Y * s, dir.X * s + dir.Y * c);
+    }
+
+    // Stateless budget-packing over a combined asteroid + alien pool: weighted pick → consume budget +
+    // cell cap → repeat, until neither fits. Weights are relative (normalised by their sum at pick).
+    private List<(bool IsAlien, string Key, float SizeMult)> ChooseSpawns(
         int budget, Dictionary<string, float> bias, float sizeBias, float cellCap)
     {
-        var result    = new List<(string, float)>();
+        var result    = new List<(bool, string, float)>();
         float remBudget = budget;
         float remCells  = cellCap;
         float alpha   = MathF.Pow(2f, -sizeBias);  // 1=uniform, 0.5=large-biased, 2=small-biased
 
         while (true)
         {
-            var candidates = new List<(string key, AsteroidConfig ac, float w)>();
+            var cands = new List<(string key, bool alien, AsteroidConfig? ac, EntityConfig? ec, float w)>();
             foreach (var (key, w) in bias)
             {
-                if (!_ctx.Config.Asteroids.TryGetValue(key, out var ac) || ac.Procedural == null) continue;
-                float minMult = ac.SizeRange[0];
-                if (ac.BaseCost * minMult > remBudget) continue;
-                if (AsteroidPrefab.CellsFor(_ctx, ac, minMult) > remCells) continue;
-                candidates.Add((key, ac, w));
+                if (_ctx.Config.Asteroids.TryGetValue(key, out var ac) && ac.Procedural != null)
+                {
+                    float minMult = ac.SizeRange[0];
+                    if (ac.BaseCost * minMult > remBudget) continue;
+                    if (AsteroidPrefab.CellsFor(_ctx, ac, minMult) > remCells) continue;
+                    cands.Add((key, false, ac, null, w));
+                }
+                else if (_ctx.Config.Entities.TryGetValue(key, out var ec))
+                {
+                    if (ec.BaseCost > remBudget || ec.CellCount > remCells) continue;
+                    cands.Add((key, true, null, ec, w));
+                }
             }
-            if (candidates.Count == 0) break;
+            if (cands.Count == 0) break;
 
-            float total = candidates.Sum(c => c.w);
+            float total = cands.Sum(c => c.w);
             float pick  = (float)_rng.NextDouble() * total;
             float cum   = 0f;
-            (string chosenKey, AsteroidConfig chosenAc, float _) = candidates[0];
-            foreach (var c in candidates) { cum += c.w; if (pick <= cum) { chosenKey = c.key; chosenAc = c.ac; break; } }
+            var chosen  = cands[0];
+            foreach (var c in cands) { cum += c.w; if (pick <= cum) { chosen = c; break; } }
 
-            float maxByBudget = remBudget / chosenAc.BaseCost;
-            float kUnit       = AsteroidPrefab.CellsFor(_ctx, chosenAc, 1f);
-            float maxByCells  = MathF.Sqrt(remCells / kUnit);
-            float maxMult     = Math.Min(chosenAc.SizeRange[1], Math.Min(maxByBudget, maxByCells));
-            float minMult0    = chosenAc.SizeRange[0];
-            if (maxMult < minMult0) break;
+            if (chosen.alien)
+            {
+                result.Add((true, chosen.key, 1f));
+                remBudget -= chosen.ec!.BaseCost;
+                remCells  -= chosen.ec!.CellCount;
+            }
+            else
+            {
+                var ac = chosen.ac!;
+                float maxByBudget = remBudget / ac.BaseCost;
+                float kUnit       = AsteroidPrefab.CellsFor(_ctx, ac, 1f);
+                float maxByCells  = MathF.Sqrt(remCells / kUnit);
+                float maxMult     = Math.Min(ac.SizeRange[1], Math.Min(maxByBudget, maxByCells));
+                float minMult0    = ac.SizeRange[0];
+                if (maxMult < minMult0) break;   // (guards above ensure this shouldn't hit)
 
-            float u        = (float)_rng.NextDouble();
-            float sizeMult = minMult0 + MathF.Pow(u, alpha) * (maxMult - minMult0);
-
-            result.Add((chosenKey, sizeMult));
-            remBudget -= chosenAc.BaseCost * sizeMult;
-            remCells  -= AsteroidPrefab.CellsFor(_ctx, chosenAc, sizeMult);
+                float u        = (float)_rng.NextDouble();
+                float sizeMult = minMult0 + MathF.Pow(u, alpha) * (maxMult - minMult0);
+                result.Add((false, chosen.key, sizeMult));
+                remBudget -= ac.BaseCost * sizeMult;
+                remCells  -= AsteroidPrefab.CellsFor(_ctx, ac, sizeMult);
+            }
         }
         return result;
     }
@@ -361,7 +754,14 @@ public sealed class PlayingState : IGameState
                 float minDist = radius + r + 20f;
                 if ((pos - p).LengthSquared() < minDist * minDist) { clear = false; break; }
             }
-            if (clear) return pos;
+            if (!clear) continue;
+
+            // Also reject overlap with bodies already in the world (prior waves, drifters) — spawning
+            // on top of an existing body is what produces the stuck-inside jitter.
+            if (PhysicsQueries.OverlapsCircle(_world, pos, radius + 20f,
+                    GameLayers.Asteroid | GameLayers.Alien | GameLayers.Player)) continue;
+
+            return pos;
         }
 
         // Fallback: top border strip.
@@ -380,54 +780,19 @@ public sealed class PlayingState : IGameState
     private void SpawnMothership()
     {
         if (!_ctx.Config.Entities.TryGetValue("mothership", out var ec)) return;
-        if (!_ctx.Shapes.TryGetValue(ec.Shape, out var sd)) return;
-        var mat = _ctx.Config.ResolveMaterial(ec.Material, sd);   // shape owns it; config overrides
-
-        float sc    = ec.ShapeScale;
-        var outline = sd.Outline.Select(xy => new Vector2(xy[0] * sc, xy[1] * sc)).ToList();
-        var seedPos = sd.Seeds.Select(s => new Vector2(s.X * sc, s.Y * sc)).ToList();
-        var seedMlt = sd.Seeds.Select(s => s.BondMult).ToList();
-        var body    = VoronoiTessellator.BuildFromExplicitSeeds(outline, seedPos, seedMlt, mat, _rng);
-        FractureBodyFactory.ApplyShapeSeeds(body, sd.Seeds, sc);
-
-        _mothershpInitialCockpits = Math.Max(1, sd.Seeds.Count(s => s.Role == "cockpit"));
-
         var wc = _ctx.Config.World;
         Vector2 playerPos = _world.IsAlive(_player) && _world.HasComponent<Transform>(_player)
             ? _world.GetComponent<Transform>(_player).Position
             : new Vector2(wc.Width / 2f, wc.Height / 2f);
-        Vector2 pos     = FindSpawnPosition(220f, new List<(Vector2, float)>(), playerPos);
-        Vector2 center  = new(wc.Width / 2f, wc.Height / 2f);
-        Vector2 dir     = center - pos;
-        float   len     = dir.Length();
-        Vector2 vel     = len > 1f ? dir / len * ec.Speed : Vector2.Zero;
-
-        var color = new BodyColor { Fill = new Color(90, 30, 130), Outline = new Color(180, 60, 240) };
-        var e = SpawnFracturableBody(body, pos, (float)(_rng.NextDouble() * MathF.Tau), vel, 0f, color);
+        Vector2 pos    = FindSpawnPosition(220f, new List<(Vector2, float)>(), playerPos);
+        Vector2 dir    = new Vector2(wc.Width / 2f, wc.Height / 2f) - pos;
+        float   len    = dir.Length();
+        Vector2 vel    = len > 1f ? dir / len * ec.Speed : Vector2.Zero;
 
         _mothershpGroupId = _fracture.AllocateGroupId();
-        _world.AddComponent(e, new AlienTag());
-        _world.AddComponent(e, new AlienVariant { Key = "mothership" });
-        _world.AddComponent(e, new ShootCooldown { Remaining = 999f });
-        _world.AddComponent(e, new MothershpId  { Id = _mothershpGroupId, InitialCockpitCount = _mothershpInitialCockpits });
-        _world.AddComponent(e, new SpawnerAccumulator { Value = 0f });
-        _world.AddComponent(e, new VortexResponse { CentripetalMult = 1f, TangentialMult = 1f });
-        if (_world.HasComponent<Collider>(e))
-        {
-            ref var col = ref _world.GetComponent<Collider>(e);
-            col.Layer = GameLayers.Alien;
-            col.Mask  = GameLayers.Asteroid | GameLayers.Player | GameLayers.Alien;
-        }
-        _ctx.CellBudget.Add(body.Cells.Length);
+        MothershipPrefab.Spawn(_world, _ctx, _rng, pos, vel, _mothershpGroupId, out _mothershpInitialCockpits);
 
-        if (ec.Boss is { } bc)
-        {
-            _bossShockwaveCd        = bc.ShockwaveCooldown;
-            _bossBlackHoleCd        = bc.BlackHoleCooldown * 0.4f;
-            _bossRamChargeCd        = bc.RamChargeCooldown * 0.7f;
-            _bossRamChargeActive    = 0f;
-            _bossOverdriveTriggered = false;
-        }
+        ShowBanner("ALIEN BOSS HAS APPEARED", BossBannerTime, boss: true);
     }
 
     // ── Player spawning ───────────────────────────────────────────────────────
@@ -461,239 +826,95 @@ public sealed class PlayingState : IGameState
     }
 
 
-    // ── Boss skill systems ────────────────────────────────────────────────────
-
-    private void UpdateBossSkills(float dt)
-    {
-        if (!_ctx.Config.Entities.TryGetValue("mothership", out var ec) || ec.Boss == null) return;
-        var bc = ec.Boss;
-
-        // Collect living mothership fragments + count living cockpits.
-        var msFrags      = new List<Entity>();
-        int msFragCount  = 0;
-        int livingCockpits = 0;
-        Vector2 msCenter = Vector2.Zero;
-        _world.ForEach<MothershpId, Transform, FracturableBody>(
-            (Entity e, ref MothershpId _, ref Transform t, ref FracturableBody fb) =>
-        {
-            msCenter += t.Position;
-            msFragCount++;
-            msFrags.Add(e);
-            bool[]? pulv = _world.HasComponent<FractureProcess>(e)
-                ? _world.GetComponent<FractureProcess>(e).Pulverized : null;
-            for (int i = 0; i < fb.Cells.Length; i++)
-                if (fb.Cells[i].Role == "cockpit" && (pulv == null || !pulv[i]))
-                    livingCockpits++;
-        });
-
-        if (msFragCount == 0 || livingCockpits == 0) { _mothershpKilled = true; return; }
-        msCenter /= msFragCount;
-
-        if (!_bossOverdriveTriggered && livingCockpits <= _mothershpInitialCockpits / 2)
-            _bossOverdriveTriggered = true;
-
-        Vector2 playerPos = _world.IsAlive(_player) && _world.HasComponent<Transform>(_player)
-            ? _world.GetComponent<Transform>(_player).Position
-            : msCenter;
-
-        // Drift: slow thrust toward player on all fragments.
-        foreach (var frag in msFrags)
-        {
-            if (!_world.IsAlive(frag) || !_world.HasComponent<Velocity>(frag)) continue;
-            Vector2 fragPos = _world.GetComponent<Transform>(frag).Position;
-            Vector2 toPlayer = playerPos - fragPos;
-            float   dist = toPlayer.Length();
-            if (dist < 1f) continue;
-            float mass = _world.HasComponent<RigidBody>(frag) ? _world.GetComponent<RigidBody>(frag).Mass : 1f;
-            ref var vel = ref _world.GetComponent<Velocity>(frag);
-            vel.Linear += toPlayer / dist * (bc.DriftThrust / MathF.Max(mass, 0.1f)) * dt;
-        }
-
-        // Ram charge: sustained burst toward player while active.
-        if (_bossRamChargeActive > 0f)
-        {
-            _bossRamChargeActive -= dt;
-            foreach (var frag in msFrags)
-            {
-                if (!_world.IsAlive(frag) || !_world.HasComponent<Velocity>(frag)) continue;
-                Vector2 fragPos  = _world.GetComponent<Transform>(frag).Position;
-                Vector2 toPlayer2 = playerPos - fragPos;
-                float   dist2 = toPlayer2.Length();
-                if (dist2 < 1f) continue;
-                float mass = _world.HasComponent<RigidBody>(frag) ? _world.GetComponent<RigidBody>(frag).Mass : 1f;
-                ref var vel = ref _world.GetComponent<Velocity>(frag);
-                vel.Linear += toPlayer2 / dist2 * (bc.RamChargeThrust / MathF.Max(mass, 0.1f)) * dt;
-            }
-        }
-
-        // Shockwave skill.
-        _bossShockwaveCd -= dt;
-        if (_bossShockwaveCd <= 0f)
-        {
-            DoShockwave(msCenter, bc);
-            _bossShockwaveCd = bc.ShockwaveCooldown;
-        }
-
-        // Black hole skill.
-        _bossBlackHoleCd -= dt;
-        if (_bossBlackHoleCd <= 0f)
-        {
-            SpawnBlackHole(msCenter, playerPos, bc);
-            _bossBlackHoleCd = bc.BlackHoleCooldown;
-        }
-
-        // Ram charge trigger.
-        _bossRamChargeCd -= dt;
-        if (_bossRamChargeCd <= 0f)
-        {
-            if ((msCenter - playerPos).Length() >= bc.RamChargeMinDist)
-                _bossRamChargeActive = bc.RamChargeDuration;
-            _bossRamChargeCd = bc.RamChargeCooldown;
-        }
-
-        // Spawner cells.
-        UpdateSpawners(dt, bc);
-    }
-
-    private void DoShockwave(Vector2 center, BossConfig bc)
-    {
-        float radSq = bc.ShockwaveRadius * bc.ShockwaveRadius;
-        var impulses = new List<(Entity e, Vector2 dir, float accel)>();
-        _world.ForEach<Transform, RigidBody>((Entity e, ref Transform t, ref RigidBody rb) =>
-        {
-            Vector2 delta = t.Position - center;
-            float dSq = delta.LengthSquared();
-            if (dSq < 1f || dSq > radSq) return;
-            float dist  = MathF.Sqrt(dSq);
-            float force = bc.ShockwaveStrength / (dist + 1f);
-            impulses.Add((e, delta / dist, force / MathF.Max(rb.Mass, 0.1f)));
-        });
-        foreach (var (e, dir, accel) in impulses)
-        {
-            if (!_world.IsAlive(e) || !_world.HasComponent<Velocity>(e)) continue;
-            ref var vel = ref _world.GetComponent<Velocity>(e);
-            vel.Linear += dir * accel;
-        }
-        _effects.EmitFlash(center, bc.ShockwaveStrength * 0.005f);
-    }
-
-    private void SpawnBlackHole(Vector2 center, Vector2 playerPos, BossConfig bc)
-    {
-        Vector2 toPlayer = playerPos - center;
-        float   tlen     = toPlayer.Length();
-        Vector2 dir      = tlen > 1f ? toPlayer / tlen : -Vector2.UnitY;
-        var bh = _world.CreateEntity();
-        _world.AddComponent(bh, new Transform { Position = center, PreviousPosition = center });
-        _world.AddComponent(bh, new Velocity  { Linear = dir * bc.BlackHoleSpeed });
-        _world.AddComponent(bh, new BlackHoleTag
-        {
-            Radius      = bc.BlackHoleRadius,
-            Strength    = bc.BlackHoleStrength,
-            CrushRadius = bc.BlackHoleCrushRadius,
-        });
-        _world.AddComponent(bh, new TimeToLive { Remaining = bc.BlackHoleDuration });
-    }
-
-    private void UpdateSpawners(float dt, BossConfig bc)
-    {
-        float interval = _bossOverdriveTriggered ? bc.SpawnInterval * 0.5f : bc.SpawnInterval;
-        string spawnType = bc.SpawnType;
-        var toSpawn = new List<Vector2>();
-
-        _world.ForEach<MothershpId, FracturableBody, Transform>(
-            (Entity e, ref MothershpId _, ref FracturableBody fb, ref Transform t) =>
-        {
-            bool hasCockpit = false;
-            bool[]? pulv = _world.HasComponent<FractureProcess>(e)
-                ? _world.GetComponent<FractureProcess>(e).Pulverized : null;
-            for (int i = 0; i < fb.Cells.Length; i++)
-                if (fb.Cells[i].Role == "cockpit" && (pulv == null || !pulv[i]))
-                { hasCockpit = true; break; }
-            if (!hasCockpit) return;
-
-            if (!_world.HasComponent<SpawnerAccumulator>(e)) return;
-            ref var acc = ref _world.GetComponent<SpawnerAccumulator>(e);
-            acc.Value += dt;
-            if (acc.Value < interval) return;
-            acc.Value = 0f;
-
-            // Use first alive spawner cell as spawn origin.
-            float cos = MathF.Cos(t.Rotation);
-            float sin = MathF.Sin(t.Rotation);
-            Vector2 fragCenter = t.Position;
-            for (int i = 0; i < fb.Cells.Length; i++)
-            {
-                if (fb.Cells[i].Role != "spawner") continue;
-                if (pulv != null && pulv[i]) continue;
-                Vector2 cen = fb.Cells[i].Centroid;
-                Vector2 worldCen = new(
-                    cen.X * cos - cen.Y * sin + fragCenter.X,
-                    cen.X * sin + cen.Y * cos + fragCenter.Y);
-                Vector2 outDir = worldCen - fragCenter;
-                float   olen   = outDir.Length();
-                if (olen < 1e-4f) outDir = Vector2.UnitX; else outDir /= olen;
-                toSpawn.Add(worldCen + outDir * bc.SpawnSafetyMargin);
-                break;
-            }
-        });
-
-        foreach (var pos in toSpawn)
-            SpawnAlien(pos, spawnType);
-    }
-
     // ── Rendering ─────────────────────────────────────────────────────────────
 
     private readonly List<Vector2> _meshVerts = new();
     private readonly List<int>     _meshLens  = new();
+    private readonly List<Vector2> _cellBuf   = new();   // one HUD cell polygon (reused)
+    private float[]                _cellDmg   = System.Array.Empty<float>();  // per-cell damage (reused)
+
+    // ── Pause menu ────────────────────────────────────────────────────────────
+    private bool _paused;
+    private int  _pauseSel;
+    private static readonly string[] PauseOpts = { "Resume", "Restart", "Main Menu" };
+
+    // ── Juice: hitstop + floating score popups ────────────────────────────────
+    private float _hitstop;                              // seconds of simulation freeze remaining
+    private struct Popup { public Vector2 Pos; public float Value, Remaining, MaxTtl, Size; }
+    private readonly List<Popup> _popups = new();
+    private float   _popAccum;                           // score accumulating toward the next popup
+    private Vector2 _popPos;                             // value-weighted world position of the accumulator
+    private float   _popTimer;                           // idle countdown to flush a partial accumulator
+
+    private void AddHitstop(float s) =>
+        _hitstop = MathF.Min(_ctx.Config.Vfx.HitstopMax, MathF.Max(_hitstop, s));
     // ── HUD constants ─────────────────────────────────────────────────────────
     // HUD-display scale for ship damage widget (body-local coords × this = HUD pixels).
-    private const float HudShipScale = 2.0f;
+    private const float HudShipScale = 2.8f;
     // X-center of ship damage widget.
-    private const float HudShipCX    = 70f;
+    private const float HudShipCX    = 92f;
     // Y-center of ship damage widget (from screen bottom).
-    private const float HudShipCYOff = 55f;
+    private const float HudShipCYOff = 74f;
     // Where weapon bars start (from left).
-    private const float HudWeapX     = 148f;
+    private const float HudWeapX     = 200f;
+    // Cooldown-bar geometry (weapons and skills share it so the HUD reads as one row).
+    private const float HudBarW      = 82f;
+    private const float HudBarH      = 13f;
+    private const float HudBarGap    = 96f;
     // Where skill bars start (from right).
-    private const float HudSkillOffX = 195f;
+    private const float HudSkillOffX = 3f * HudBarGap + 14f;
 
-    private static readonly (string Role, string WeapKey, string Label, Color Color)[] WeaponDefs =
+    // Labels carry the bound key so the HUD can never drift from PlayerControlSystem's bindings.
+    private static readonly (string Role, string WeapKey, string Label, string Key, Color Color)[] WeaponDefs =
     [
-        ("cannon",   "cannon",   "C", new Color(255, 200, 80)),
-        ("shotgun",  "shotgun",  "S", new Color(255, 140, 60)),
-        ("piercing", "piercing", "P", new Color(180, 120, 255)),
-        ("grenade",  "grenade",  "G", new Color(100, 220, 120)),
+        ("cannon",   "cannon",   "CANNON",  "LMB", new Color(255, 200, 80)),
+        ("shotgun",  "shotgun",  "SHOTGUN", "RMB", new Color(255, 140, 60)),
+        ("piercing", "piercing", "PIERCE",  "G",   new Color(180, 120, 255)),
+        ("grenade",  "grenade",  "GRENADE", "F",   new Color(100, 220, 120)),
     ];
-    private static readonly (string SkillKey, string Label)[] SkillDefs =
+    private static readonly (string SkillKey, string Label, string Key)[] SkillDefs =
     [
-        ("dash",   "Q"),
-        ("turbo",  "E"),
-        ("slowmo", "R"),
+        ("dash",   "DASH",    "Q"),
+        ("turbo",  "TURBO",   "E"),
+        ("slowmo", "SLOW-MO", "R"),
     ];
 
     private void DrawHud(IRenderer r)
     {
-        var font  = new FontSpec("monospace", 13f);
-        var small = new FontSpec("monospace", 11f);
+        var label = new FontSpec("monospace", 14f, bold: true);
 
-        // ── Top-left: timer + score ───────────────────────────────────────────
+        // ── Top-left: timer (big) / score (big) / best / combo ────────────────
         int elapsed = (int)_gameTime;
-        r.DrawText($"{elapsed / 60:00}:{elapsed % 60:00}   {_ctx.Score.Total:F0} pts",
-            new Vector2(12f, 10f), new Color(190, 200, 220), font);
+        r.DrawText($"{elapsed / 60:00}:{elapsed % 60:00}",
+            new Vector2(14f, 10f), new Color(225, 232, 250), new FontSpec("monospace", 32f, bold: true));
+        r.DrawText($"{_ctx.Score.Total:F0} pts",
+            new Vector2(14f, 50f), new Color(255, 228, 130), new FontSpec("monospace", 22f, bold: true));
+        r.DrawText($"best {_ctx.HighScore:F0}",
+            new Vector2(14f, 78f), new Color(150, 165, 195), new FontSpec("monospace", 14f));
+
+        var steps = _ctx.Config.Scoring.KillChainSteps;
+        int tier  = _ctx.Score.ChainTier;
+        if (tier > 0 && steps.Length > 0)
+        {
+            float mult = tier < steps.Length ? steps[tier] : steps[^1];
+            float f    = steps.Length > 1 ? tier / (float)(steps.Length - 1) : 1f;   // 0→1 across tiers
+            var comboC = new Color(255, (byte)(220 - 120 * f), (byte)(90 - 60 * f));  // yellow → red
+            r.DrawText($"x{mult:0.#} COMBO", new Vector2(14f, 100f), comboC, new FontSpec("monospace", 19f, bold: true));
+        }
 
         if (!_world.IsAlive(_player)) return;
 
-        float bY = _ctx.ScreenH - 10f;  // bottom of HUD bar area
+        float bY = _ctx.ScreenH - 12f;  // bottom of HUD bar area
 
         // ── Ship damage widget ─────────────────────────────────────────────────
         var shipCenter = new Vector2(HudShipCX, _ctx.ScreenH - HudShipCYOff);
         DrawShipWidget(r, shipCenter, HudShipScale);
 
         // ── Weapon cooldown bars ───────────────────────────────────────────────
-        DrawWeaponBars(r, HudWeapX, bY, small);
+        DrawWeaponBars(r, HudWeapX, bY, label);
 
         // ── Skill cooldown bars ────────────────────────────────────────────────
-        DrawSkillBars(r, _ctx.ScreenW - HudSkillOffX, bY, small);
+        DrawSkillBars(r, _ctx.ScreenW - HudSkillOffX, bY, label);
     }
 
     private void DrawShipWidget(IRenderer r, Vector2 center, float scale)
@@ -703,18 +924,27 @@ public sealed class PlayingState : IGameState
         bool[]? pulv = _world.HasComponent<FractureProcess>(_player)
             ? _world.GetComponent<FractureProcess>(_player).Pulverized : null;
 
-        // Fill alive cells (green).
-        _meshVerts.Clear(); _meshLens.Clear();
-        for (int ci = 0; ci < fb.Cells.Length; ci++)
+        // Per-cell damage = comminution toward the vaporise threshold (Cell.Damage). It accumulates on
+        // hits and HEALS over time via relaxRate (StressRelaxSystem), so the ship reddens then recovers
+        // — matching the fracture model, unlike instantaneous bond stress.
+        int nCells = fb.Cells.Length;
+        if (_cellDmg.Length < nCells) _cellDmg = new float[nCells];
+        var mat = fb.Material;
+        for (int i = 0; i < nCells; i++)
+        {
+            float threshold = mat.CellToughness * fb.Cells[i].Area * fb.Cells[i].DensityMult * mat.Density;
+            _cellDmg[i] = threshold > 1e-3f ? Math.Clamp(fb.Cells[i].Damage / threshold, 0f, 1f) : 0f;
+        }
+
+        // Fill alive cells, coloured green → orange → red by their damage.
+        for (int ci = 0; ci < nCells; ci++)
         {
             if (pulv?[ci] == true) continue;
             var lv = fb.Cells[ci].Local;
-            foreach (var v in lv) _meshVerts.Add(center + v * scale);
-            _meshLens.Add(lv.Length);
+            _cellBuf.Clear();
+            foreach (var v in lv) _cellBuf.Add(center + v * scale);
+            r.FillPolygon(CollectionsMarshal.AsSpan(_cellBuf), DamageColor(_cellDmg[ci]));
         }
-        if (_meshVerts.Count > 0)
-            r.FillPath(CollectionsMarshal.AsSpan(_meshVerts), CollectionsMarshal.AsSpan(_meshLens),
-                new Color(45, 165, 65, 210));
 
         // Outlines: alive cells.
         for (int ci = 0; ci < fb.Cells.Length; ci++)
@@ -737,26 +967,74 @@ public sealed class PlayingState : IGameState
         }
     }
 
+    // Damage 0→1 mapped green → orange → red for the HUD ship widget.
+    private static Color DamageColor(float d)
+    {
+        d = Math.Clamp(d, 0f, 1f);
+        Color green  = new(45, 165, 65,  210);
+        Color orange = new(225, 140, 40, 210);
+        Color red    = new(205, 45, 45,  210);
+        return d < 0.5f ? LerpColor(green, orange, d / 0.5f)
+                        : LerpColor(orange, red, (d - 0.5f) / 0.5f);
+    }
+
+    private static Color LerpColor(Color a, Color b, float t) => new(
+        (byte)(a.R + (b.R - a.R) * t),
+        (byte)(a.G + (b.G - a.G) * t),
+        (byte)(a.B + (b.B - a.B) * t),
+        (byte)(a.A + (b.A - a.A) * t));
+
+    private void DrawBanner(IRenderer r)
+    {
+        if (_bannerTimer <= 0f) return;
+        float k = Math.Clamp(_bannerTimer / MathF.Max(0.01f, _bannerMax), 0f, 1f);
+        float a = k > 0.8f ? (1f - k) / 0.2f : k / 0.8f;   // quick fade-in, slow fade-out
+        a = Math.Clamp(a, 0f, 1f);
+        var  col  = _bannerBoss ? new Color(255, 90, 90, (byte)(255 * a)) : new Color(230, 235, 255, (byte)(230 * a));
+        var  font = new FontSpec("monospace", _bannerBoss ? 34f : 42f, bold: true);
+        Vector2 sz = r.MeasureText(_bannerText, font);
+        r.DrawText(_bannerText, new Vector2(_ctx.ScreenW / 2f - sz.X / 2f, _ctx.ScreenH * 0.20f), col, font);
+    }
+
+    private void DrawPauseMenu(IRenderer r)
+    {
+        FillRect(r, 0f, 0f, _ctx.ScreenW, _ctx.ScreenH, new Color(6, 8, 12, 175));
+        float cx = _ctx.ScreenW / 2f, cy = _ctx.ScreenH / 2f;
+        r.DrawText("PAUSED", new Vector2(cx - 72f, cy - 96f), new Color(220, 235, 255), new FontSpec("monospace", 34f));
+        var opt = new FontSpec("monospace", 20f);
+        for (int i = 0; i < PauseOpts.Length; i++)
+        {
+            bool sel = i == _pauseSel;
+            var col  = sel ? new Color(255, 220, 90) : new Color(150, 165, 195);
+            r.DrawText((sel ? "> " : "  ") + PauseOpts[i], new Vector2(cx - 60f, cy - 22f + i * 30f), col, opt);
+        }
+        r.DrawText("W/S move   ENTER select   ESC resume",
+            new Vector2(cx - 168f, cy + 92f), new Color(80, 100, 130), new FontSpec("monospace", 13f));
+    }
+
     private void DrawWeaponBars(IRenderer r, float startX, float bottomY, in FontSpec font)
     {
-        const float BarW = 38f, BarH = 8f, Gap = 46f;
-
         bool hasFb  = _world.HasComponent<FracturableBody>(_player);
         bool hasFp  = hasFb && _world.HasComponent<FractureProcess>(_player);
         bool[]? pulv = hasFp ? _world.GetComponent<FractureProcess>(_player).Pulverized : null;
         WeaponCooldowns wcd = _world.HasComponent<WeaponCooldowns>(_player)
             ? _world.GetComponent<WeaponCooldowns>(_player) : default;
 
+        var keyFont = new FontSpec("monospace", 12f);
         float x = startX;
-        foreach (var (role, key, label, col) in WeaponDefs)
+        foreach (var (role, key, label, bind, col) in WeaponDefs)
         {
             bool cellAlive = IsWeaponCellAlive(role, hasFb, pulv);
-            Color textC = cellAlive ? col           : new Color(70, 74, 85);
+            Color textC = cellAlive ? col : new Color(70, 74, 85);
+            Color keyC  = cellAlive ? new Color(190, 200, 220) : new Color(70, 74, 85);
             Color bgC   = new Color(22, 25, 32);
-            Color fgC   = cellAlive ? col           : new Color(45, 48, 58);
+            Color fgC   = cellAlive ? col : new Color(45, 48, 58);
 
-            r.DrawText(label, new Vector2(x + 1f, bottomY - BarH - 15f), textC, font);
-            FillRect(r, x, bottomY - BarH, BarW, BarH, bgC);
+            // Name + bound key above the bar: "CANNON [LMB]".
+            r.DrawText(label, new Vector2(x + 1f, bottomY - HudBarH - 22f), textC, font);
+            Vector2 nameSz = r.MeasureText(label, font);
+            r.DrawText($"[{bind}]", new Vector2(x + 1f + nameSz.X + 5f, bottomY - HudBarH - 20f), keyC, keyFont);
+            FillRect(r, x, bottomY - HudBarH, HudBarW, HudBarH, bgC);
 
             if (cellAlive)
             {
@@ -768,15 +1046,15 @@ public sealed class PlayingState : IGameState
                     "grenade"  => wcd.Grenade,
                     _          => 0f
                 };
-                float fill = BarW;
+                float fill = HudBarW;
                 if (_ctx.Config.Weapons.TryGetValue(key, out var wCfg))
                 {
                     float maxCd = 1f / MathF.Max(0.001f, wCfg.FireRate);
-                    fill = BarW * (1f - Math.Clamp(cdRem / maxCd, 0f, 1f));
+                    fill = HudBarW * (1f - Math.Clamp(cdRem / maxCd, 0f, 1f));
                 }
-                if (fill > 0f) FillRect(r, x, bottomY - BarH, fill, BarH, fgC);
+                if (fill > 0f) FillRect(r, x, bottomY - HudBarH, fill, HudBarH, fgC);
             }
-            x += Gap;
+            x += HudBarGap;
         }
     }
 
@@ -794,8 +1072,6 @@ public sealed class PlayingState : IGameState
 
     private void DrawSkillBars(IRenderer r, float startX, float bottomY, in FontSpec font)
     {
-        const float BarW = 52f, BarH = 8f, Gap = 60f;
-
         bool hasFb  = _world.HasComponent<FracturableBody>(_player);
         bool hasFp  = hasFb && _world.HasComponent<FractureProcess>(_player);
         bool[]? pulv = hasFp ? _world.GetComponent<FractureProcess>(_player).Pulverized : null;
@@ -803,11 +1079,12 @@ public sealed class PlayingState : IGameState
         SkillState sk = _world.HasComponent<SkillState>(_player)
             ? _world.GetComponent<SkillState>(_player) : default;
 
+        var keyFont = new FontSpec("monospace", 12f);
         float x = startX;
-        foreach (var (key, label) in SkillDefs)
+        foreach (var (key, label, bind) in SkillDefs)
         {
             bool gate = key == "slowmo" || propOk;
-            if (!_ctx.Config.Skills.TryGetValue(key, out var sc)) { x += Gap; continue; }
+            if (!_ctx.Config.Skills.TryGetValue(key, out var sc)) { x += HudBarGap; continue; }
 
             float cdRem = key switch
             {
@@ -828,14 +1105,18 @@ public sealed class PlayingState : IGameState
                 _        => new Color(160, 170, 185)
             };
             Color textC = gate ? col : new Color(70, 74, 85);
+            Color keyC  = gate ? new Color(190, 200, 220) : new Color(70, 74, 85);
             Color bgC   = new Color(22, 25, 32);
             Color fgC   = gate ? col : new Color(45, 48, 58);
 
-            r.DrawText(label, new Vector2(x + 1f, bottomY - BarH - 15f), textC, font);
-            FillRect(r, x, bottomY - BarH, BarW, BarH, bgC);
-            float fill = BarW * ratio;
-            if (fill > 0f && gate) FillRect(r, x, bottomY - BarH, fill, BarH, fgC);
-            x += Gap;
+            // Name + bound key above the bar: "DASH [Q]".
+            r.DrawText(label, new Vector2(x + 1f, bottomY - HudBarH - 22f), textC, font);
+            Vector2 nameSz = r.MeasureText(label, font);
+            r.DrawText($"[{bind}]", new Vector2(x + 1f + nameSz.X + 5f, bottomY - HudBarH - 20f), keyC, keyFont);
+            FillRect(r, x, bottomY - HudBarH, HudBarW, HudBarH, bgC);
+            float fill = HudBarW * ratio;
+            if (fill > 0f && gate) FillRect(r, x, bottomY - HudBarH, fill, HudBarH, fgC);
+            x += HudBarGap;
         }
     }
 

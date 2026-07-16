@@ -56,9 +56,9 @@ while (!window.ShouldClose)
     lastTicks = now;
 
     input.BeginFrame();
-    if (input.IsPressed(KeyCode.Escape)) break;
 
-    // Fixed-step updates.
+    // Fixed-step updates. Esc is handled by the states (menu quits, PlayingState pauses); a state
+    // sets ctx.QuitRequested to exit.
     int steps = fixedStep.Advance(frameTime);
     for (int i = 0; i < steps; i++)
     {
@@ -70,6 +70,7 @@ while (!window.ShouldClose)
             state.Enter();
         }
     }
+    if (ctx.QuitRequested) break;
 
     // Render at the sub-step alpha position.
     state.Draw(window.Renderer, fixedStep.Alpha);

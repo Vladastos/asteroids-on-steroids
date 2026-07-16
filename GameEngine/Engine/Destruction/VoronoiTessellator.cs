@@ -120,7 +120,8 @@ public static class VoronoiTessellator
         IReadOnlyList<float>   seedBondMults,
         Func<Vector2, bool>?   membership,
         in FractureProperties  material,
-        Random rng)
+        Random rng,
+        int relaxIterations = 0)
     {
         if (convexBound.Count < 3)     throw new ArgumentException("Bound needs ≥ 3 vertices.", nameof(convexBound));
         if (seedPositions.Count < 1)   throw new ArgumentException("At least one seed required.", nameof(seedPositions));
@@ -128,23 +129,110 @@ public static class VoronoiTessellator
         var seeds = new Vector2[seedPositions.Count];
         for (int i = 0; i < seeds.Length; i++) seeds[i] = seedPositions[i];
 
-        var kept    = new List<Vector2[]>(seeds.Length);
-        var keptIdx = new List<int>(seeds.Length);
+        var bound = convexBound as Vector2[] ?? convexBound.ToArray();
 
+        // Even out the (white-noise) seeds: Lloyd relaxation makes the Voronoi cells uniform and
+        // rounded instead of cluttered with slivers and elongated cells. Done before membership is
+        // evaluated, so concavity acts on the relaxed positions.
+        if (relaxIterations > 0) LloydRelax(seeds, convexBound, relaxIterations);
+
+        // 1. Full Voronoi over ALL seeds → every area-valid cell, recording its seed index, whether
+        //    it passed membership, and whether it touches the outer bound (a "hull" cell).
+        var polys = new List<Vector2[]>(seeds.Length);
+        var sidx  = new List<int>(seeds.Length);
+        var pass  = new List<bool>(seeds.Length);
+        var hull  = new List<bool>(seeds.Length);
         for (int i = 0; i < seeds.Length; i++)
         {
             var poly = VoronoiCell(i, seeds, convexBound);
             if (poly.Count < 3) continue;
             if (MathF.Abs(PolygonUtils.ComputeArea(poly)) < MinCellArea) continue;
-            if (membership != null && !membership(seeds[i])) continue;
-            kept.Add(poly.ToArray());
-            keptIdx.Add(i);
+            var arr = poly.ToArray();
+            polys.Add(arr);
+            sidx.Add(i);
+            pass.Add(membership == null || membership(seeds[i]));
+            hull.Add(SharedEdgeLength(arr, bound) > MinSharedEdge);   // shares an edge with the outline
         }
-        if (kept.Count == 0) { kept.Add(convexBound.ToArray()); keptIdx.Add(0); }
+        int m = polys.Count;
+
+        // 2. Adjacency over all valid cells (shared Voronoi edges); reused for connectivity and bonds.
+        var nbr    = new List<int>[m];
+        var nbrLen = new List<float>[m];
+        for (int i = 0; i < m; i++) { nbr[i] = new(); nbrLen[i] = new(); }
+        for (int i = 0; i < m; i++)
+            for (int j = i + 1; j < m; j++)
+            {
+                float shared = SharedEdgeLength(polys[i], polys[j]);
+                if (shared > MinSharedEdge)
+                {
+                    nbr[i].Add(j); nbrLen[i].Add(shared);
+                    nbr[j].Add(i); nbrLen[j].Add(shared);
+                }
+            }
+
+        // 3. Keep only the largest connected component of membership-passed cells — random concavity
+        //    removal can sever rim clumps or orphan a cell; this discards those islands.
+        var keep  = new bool[m];
+        var comp  = new int[m];
+        for (int i = 0; i < m; i++) comp[i] = -1;
+        var stack = new Stack<int>();
+        int bestComp = -1, bestSize = 0, cid = 0;
+        for (int s = 0; s < m; s++)
+        {
+            if (!pass[s] || comp[s] != -1) continue;
+            int size = 0; comp[s] = cid; stack.Push(s);
+            while (stack.Count > 0)
+            {
+                int u = stack.Pop(); size++;
+                var nu = nbr[u];
+                for (int t = 0; t < nu.Count; t++)
+                {
+                    int v = nu[t];
+                    if (pass[v] && comp[v] == -1) { comp[v] = cid; stack.Push(v); }
+                }
+            }
+            if (size > bestSize) { bestSize = size; bestComp = cid; }
+            cid++;
+        }
+        for (int i = 0; i < m; i++) if (comp[i] == bestComp) keep[i] = true;
+
+        // 4. Hole-fill: flood the empty cells; any empty region the exterior can't reach (never
+        //    touches a hull cell) is an enclosed void → fill it back. Boundary concavities stay
+        //    open because their empty cells do reach the hull.
+        var seen   = new bool[m];
+        var region = new List<int>();
+        for (int s = 0; s < m; s++)
+        {
+            if (keep[s] || seen[s]) continue;
+            region.Clear();
+            bool touchesHull = false;
+            seen[s] = true; stack.Push(s);
+            while (stack.Count > 0)
+            {
+                int u = stack.Pop();
+                region.Add(u);
+                if (hull[u]) touchesHull = true;
+                var nu = nbr[u];
+                for (int t = 0; t < nu.Count; t++)
+                {
+                    int v = nu[t];
+                    if (!keep[v] && !seen[v]) { seen[v] = true; stack.Push(v); }
+                }
+            }
+            if (!touchesHull) foreach (int c in region) keep[c] = true;
+        }
+
+        // 5. Materialize kept cells + bonds (from the adjacency already computed).
+        var keptPolys = new List<Vector2[]>(m);
+        var localOf   = new int[m];
+        for (int i = 0; i < m; i++) localOf[i] = -1;
+        for (int i = 0; i < m; i++)
+            if (keep[i]) { localOf[i] = keptPolys.Count; keptPolys.Add(polys[i]); }
+        if (keptPolys.Count == 0) keptPolys.Add(bound);   // degenerate fallback: one cell, no bonds
 
         float totalArea = 0f;
         Vector2 bodyCentroid = Vector2.Zero;
-        foreach (var poly in kept)
+        foreach (var poly in keptPolys)
         {
             float a = MathF.Abs(PolygonUtils.ComputeArea(poly));
             bodyCentroid += PolygonUtils.ComputeCentroid(poly) * a;
@@ -152,10 +240,10 @@ public static class VoronoiTessellator
         }
         bodyCentroid /= totalArea;
 
-        var cells = new Cell[kept.Count];
-        for (int i = 0; i < kept.Count; i++)
+        var cells = new Cell[keptPolys.Count];
+        for (int i = 0; i < keptPolys.Count; i++)
         {
-            var world = kept[i];
+            var world = keptPolys[i];
             var local = new Vector2[world.Length];
             for (int k = 0; k < world.Length; k++) local[k] = world[k] - bodyCentroid;
             cells[i] = new Cell
@@ -166,12 +254,32 @@ public static class VoronoiTessellator
             };
         }
 
-        var bonds = BuildBondsWeighted(cells, keptIdx, seedBondMults, material.Toughness);
+        var bondList = new List<Bond>();
+        for (int i = 0; i < m; i++)
+        {
+            if (localOf[i] < 0) continue;
+            var nu = nbr[i]; var nl = nbrLen[i];
+            for (int t = 0; t < nu.Count; t++)
+            {
+                int j = nu[t];
+                if (j <= i || localOf[j] < 0) continue;   // each kept↔kept pair once
+                float mi = sidx[i] < seedBondMults.Count ? seedBondMults[sidx[i]] : 1f;
+                float mj = sidx[j] < seedBondMults.Count ? seedBondMults[sidx[j]] : 1f;
+                float bm = MathF.Sqrt(mi * mj);
+                bondList.Add(new Bond
+                {
+                    A = localOf[i], B = localOf[j],
+                    EdgeLength   = nl[t],
+                    Strength     = nl[t] * material.Toughness * bm,
+                    StrengthMult = bm,
+                });
+            }
+        }
 
         return new FracturableBody
         {
             Cells    = cells,
-            Bonds    = bonds,
+            Bonds    = bondList.ToArray(),
             Material = material,
             State    = new FractureState { RngSeed = (uint)rng.Next() },
         };
@@ -306,6 +414,26 @@ public static class VoronoiTessellator
                 (min.Y + max.Y) * 0.5f + (float)(rng.NextDouble() - 0.5) * step));
 
         return seeds.ToArray();
+    }
+
+    /// <summary>Lloyd relaxation: each pass moves every seed to the centroid of its (bound-clipped)
+    /// Voronoi cell, converging toward a centroidal Voronoi tessellation — evenly-sized, rounded cells.
+    /// Centroids of cells clipped to the convex bound stay inside it, so seeds never leave the body.</summary>
+    private static void LloydRelax(Vector2[] seeds, IReadOnlyList<Vector2> bound, int iterations)
+    {
+        if (seeds.Length < 2) return;
+        var next = new Vector2[seeds.Length];
+        for (int it = 0; it < iterations; it++)
+        {
+            for (int i = 0; i < seeds.Length; i++)
+            {
+                var poly = VoronoiCell(i, seeds, bound);
+                next[i] = (poly.Count >= 3 && MathF.Abs(PolygonUtils.ComputeArea(poly)) > MinCellArea)
+                    ? PolygonUtils.ComputeCentroid(poly)
+                    : seeds[i];
+            }
+            Array.Copy(next, seeds, seeds.Length);
+        }
     }
 
     /// <summary>Voronoi cell of seed[self]: the bound clipped by the perpendicular

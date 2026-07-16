@@ -1,4 +1,5 @@
 using System.Numerics;
+using AsteroidsEngine.Engine.Rendering;
 
 namespace AsteroidsEngine.Engine.Destruction;
 
@@ -21,6 +22,10 @@ public struct Cell
     /// <summary>Functional role assigned by the shape editor (cockpit, cannon, propeller, etc.).
     /// Null / empty = generic. Preserved through fracture splits.</summary>
     public string?   Role        = null;
+    /// <summary>Baked fill colour (role tint + density + rim shading). Computed once when the body is
+    /// first built and carried through fracture, so a body's cells never recolour when it takes damage.
+    /// Alpha 0 = not yet baked. (Rendering-only; ignored by the physics.)</summary>
+    public Color     FillColor   = default;
 
     public Cell() { }  // required by C# when struct has field initializers (CS8983)
 }

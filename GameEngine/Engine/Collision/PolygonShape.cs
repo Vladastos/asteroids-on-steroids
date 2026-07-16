@@ -254,6 +254,10 @@ public sealed class PolygonShape : CollisionShape
     /// <summary>Returns a copy of the centroid-relative local vertices.</summary>
     public Vector2[] GetLocalVertices() => (Vector2[])_localVertices.Clone();
 
+    /// <summary>Zero-copy view of the local vertices, for engine-internal hot paths that must not
+    /// allocate per part per frame (e.g. CompoundShape's swept-segment cell query).</summary>
+    internal ReadOnlySpan<Vector2> LocalVertices => _localVertices;
+
     internal Vector2[] TransformVertices(Vector2 pos, float rot)
     {
         var result = new Vector2[_localVertices.Length];

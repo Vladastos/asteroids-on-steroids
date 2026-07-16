@@ -189,18 +189,22 @@ public static class FractureSimulator
             {
                 for (int v = 0; v < local.Length; v++) local[v] = src.Local[v] - cen;
             }
+            // Damage carries over (× SplitStressInherit): fragmentation must not heal the survivors.
             newCells[k] = new Cell { Local = local, Centroid = cellCen, Area = src.Area,
-                                     DensityMult = src.DensityMult, Role = src.Role };
+                                     DensityMult = src.DensityMult, Role = src.Role, FillColor = src.FillColor,
+                                     Damage = src.Damage * FractureTuning.SplitStressInherit };
         }
 
         // Keep only UNBROKEN bonds within the component; broken ones become cracks (missing bonds).
+        // Surviving bonds keep their accumulated Stress (× SplitStressInherit) for the same reason.
         var newBonds = new List<Bond>();
         for (int bi = 0; bi < bonds.Length; bi++)
         {
             Bond b = bonds[bi];
             if (!broken[bi] && comp[b.A] == label && comp[b.B] == label)
                 newBonds.Add(new Bond { A = remap[b.A], B = remap[b.B], EdgeLength = b.EdgeLength,
-                                        Strength = b.Strength, StrengthMult = b.StrengthMult });
+                                        Strength = b.Strength, StrengthMult = b.StrengthMult,
+                                        Stress = b.Stress * FractureTuning.SplitStressInherit });
         }
 
         // Fragment mass = its DensityMult-weighted share of the body mass.
@@ -239,7 +243,10 @@ public static class FractureSimulator
             Mass = mass,
             Inertia = inertia,
             Area = area,
-            IsDebris = idxs.Count == 1 && area < mat.MinFragmentArea,
+            // Only genuinely degenerate slivers become pure dust; everything else spawns as a body.
+            // Small bodies (area < MinFragmentArea) are flagged Fragile at spawn and one-shot-vaporise
+            // instead of lingering — so MinFragmentArea now tunes the fragile threshold, not the dust one.
+            IsDebris = idxs.Count == 1 && area < 40f,
         };
     }
 
@@ -359,9 +366,6 @@ public static class FractureSimulator
                     ImpactDir = proc.ImpactDir,
                     ImpactPointWorld = proc.ImpactPointWorld,
                     Directionality = proc.Directionality,
-                    StepsPerIteration = proc.StepsPerIteration,
-                    FramesPerIteration = proc.FramesPerIteration,
-                    FrameCounter = 0,
                     Done = false,
                 };
             }
@@ -401,6 +405,10 @@ public static class FractureSimulator
             Directionality = f.Directionality,
             Brittleness = f.Brittleness,
             BlastFraction = f.BlastFraction,
+            // Keep the hit's own pace across the split so a fast-cracking front stays fast.
+            StepsPerIteration = f.StepsPerIteration,
+            FramesPerIteration = f.FramesPerIteration,
+            FrameCounter = f.FrameCounter,
         };
         sub.Frontier.AddRange(frontier);
         return sub;

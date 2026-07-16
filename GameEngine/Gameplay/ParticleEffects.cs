@@ -37,6 +37,34 @@ public sealed class ParticleEffects
         });
     }
 
+    /// <summary>A bright, fast spark cone sprayed back off the surface along the impact axis
+    /// (dir = the impactor's travel direction). Count/size scale with impact energy.</summary>
+    public void EmitSparks(Vector2 point, Vector2 dir, float energy)
+    {
+        float e = Math.Clamp(energy / 80_000f, 0.2f, 2.2f);
+        int n = Math.Max(1, (int)(_vfx.SparkCount * e));
+        // Spray back toward the impactor (−dir), fanned.
+        Vector2 back = dir.LengthSquared() > 1e-4f ? -Vector2.Normalize(dir)
+                     : new Vector2(MathF.Cos((float)_rng.NextDouble() * MathF.Tau),
+                                   MathF.Sin((float)_rng.NextDouble() * MathF.Tau));
+        for (int i = 0; i < n; i++)
+        {
+            float ang = ((float)_rng.NextDouble() * 2f - 1f) * MathF.PI * _vfx.SparkSpread;
+            float ca = MathF.Cos(ang), sa = MathF.Sin(ang);
+            Vector2 sd  = new(back.X * ca - back.Y * sa, back.X * sa + back.Y * ca);
+            float   spd = _vfx.SparkSpeed * (0.5f + (float)_rng.NextDouble());
+            float   ttl = _vfx.SparkTtl   * (0.6f + 0.7f * (float)_rng.NextDouble());
+            float   sz  = _vfx.SparkSize  * (0.7f + 0.6f * (float)_rng.NextDouble()) * (0.8f + 0.4f * e);
+            _fx.Emit(new Particle
+            {
+                Position = point, Velocity = sd * spd, Drag = 6f,
+                Life = ttl, MaxLife = ttl,
+                Size0 = sz, Size1 = 0.1f,
+                Color0 = new Color(255, 240, 180, 255), Color1 = new Color(255, 120, 40, 0),
+            });
+        }
+    }
+
     public void EmitDustBurst(Vector2 centroid, Vector2 dirHint, Vector2 carrier, float area, BodyColor color)
     {
         int n = Math.Clamp((int)(area / 200f), 2, (int)_vfx.DustCount);

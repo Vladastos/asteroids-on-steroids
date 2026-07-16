@@ -97,6 +97,15 @@ public sealed class InputSystem
     public bool IsPressed(KeyCode key) =>
         (!SuppressKeyboard || IsEditingKey(key) || CtrlHeld) && _pressedThisFrame.Contains(key);
 
+    /// <summary>Like IsPressed, but consumes the press so it won't fire again this frame — for
+    /// edge-triggered UI actions that Update() may poll on several fixed steps per frame.</summary>
+    public bool ConsumePress(KeyCode key)
+    {
+        if (!IsPressed(key)) return false;
+        _pressedThisFrame.Remove(key);
+        return true;
+    }
+
     /// <summary>Key came up this frame (true for exactly one frame).</summary>
     public bool IsReleased(KeyCode key) =>
         (!SuppressKeyboard || IsEditingKey(key) || CtrlHeld) && _releasedThisFrame.Contains(key);

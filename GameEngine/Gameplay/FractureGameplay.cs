@@ -1,4 +1,5 @@
 using System.Numerics;
+using AsteroidsEngine.Engine.Collision;
 using AsteroidsEngine.Engine.Components;
 using AsteroidsEngine.Engine.Core;
 using AsteroidsEngine.Engine.Destruction;
@@ -123,12 +124,42 @@ public sealed class FractureGameplay
         _world.AddComponent(ne, new AlienTag());
         _world.AddComponent(ne, av);
         _world.AddComponent(ne, new ShootCooldown { Remaining = shootCooldown });
+        if (av.Key != null && _ctx.Config.Entities.TryGetValue(av.Key, out var ecfg) && ecfg.Dash is not null)
+            _world.AddComponent(ne, new AlienSkillState { DashCd = ecfg.Dash.Cooldown });
         if (_world.HasComponent<Collider>(ne))
         {
             ref var col = ref _world.GetComponent<Collider>(ne);
             col.Layer = GameLayers.Alien;
             col.Mask  = GameLayers.Asteroid | GameLayers.Player | GameLayers.Alien;
         }
+    }
+
+    // A shard of a shattered piercing round inherits the round's behaviour: it stays a sensor (passes
+    // through, no collision/jitter) and keeps the PiercingRoundTag so ProjectileSystem still drives it
+    // and the body-vs-body fracture path ignores it. GhostSystem promotes it to the bullet layer.
+    private void TagPiercingFragment(Entity ne, in PiercingRoundTag parent)
+    {
+        if (_world.HasComponent<Collider>(ne))
+        {
+            ref var col = ref _world.GetComponent<Collider>(ne);
+            col.Sensor = true;
+        }
+        // A shard's penetration budget is recomputed from ITS OWN kinetic energy at the parent's
+        // KE→power exchange rate — small slow shards are nearly spent, a big fast one stays mean.
+        float m = _world.HasComponent<RigidBody>(ne) ? _world.GetComponent<RigidBody>(ne).Mass : 1f;
+        float v = _world.HasComponent<Velocity>(ne)  ? _world.GetComponent<Velocity>(ne).Linear.Length() : 0f;
+        float power = parent.PowerPerKE * 0.5f * m * v * v;
+        _world.AddComponent(ne, new PiercingRoundTag
+        {
+            Direction    = parent.Direction,
+            LateralClamp = parent.LateralClamp,
+            PlayerGrace  = 0f,
+            Power        = power,
+            Power0       = MathF.Max(power, 1e-3f),
+            PowerPerKE   = parent.PowerPerKE,
+            LastTarget   = default,   // a shard pays for its own cells from scratch
+            LastCell     = -1,
+        });
     }
 
     private bool IsDashInvincible() =>
@@ -167,16 +198,20 @@ public sealed class FractureGameplay
         if (!_ctx.Config.Weapons.TryGetValue(weaponKey, out var weaponCfg)) return;
         WeaponProfile profile = weaponCfg.ToWeaponProfile();
         var frac = _ctx.Config.Fracture;
-        // Real impactor mass: the weapon's own Mass, else the global BulletMass. EnergyScale converts
-        // to fracture units; per-weapon damage also differs through projectile SPEED (E ∝ v²) and count.
-        float bulletMass = weaponCfg.Mass ?? frac.BulletMass;
+        // Real impactor mass: per-weapon Mass, else the global BulletMass. EnergyScale converts to
+        // fracture units; per-weapon damage also differs through projectile SPEED (E ∝ v²) and count.
+        // Shrapnel carry the "grenade" key (the grenade projectile itself detonates at line 162 and
+        // never reaches here), so they take the grenade's dedicated ShrapnelMass.
+        float bulletMass = (weaponKey == "grenade" ? weaponCfg.ShrapnelMass : weaponCfg.Mass) ?? frac.BulletMass;
 
-        _effects.EmitFlash(ev.Point, 0.5f * bulletMass * bulletVel.LengthSquared());
+        float impactE = 0.5f * bulletMass * bulletVel.LengthSquared();
+        _effects.EmitFlash(ev.Point, impactE);
+        _effects.EmitSparks(ev.Point, ev.ShotDir, impactE);
 
         // Scale fracture energy by target's impact coefficient.
         float adjMass = bulletMass;
         if (ev.Target == Player)
-            adjMass = bulletMass * _ctx.Config.Player.PlayerImpactCoeff;
+            adjMass = bulletMass * _ctx.PlayerImpactCoeff;
         else if (_world.HasComponent<AlienVariant>(ev.Target))
         {
             string varKey = _world.GetComponent<AlienVariant>(ev.Target).Key;
@@ -196,62 +231,12 @@ public sealed class FractureGameplay
         Entity eA = ev.EntityA, eB = ev.EntityB;
         if (!_world.IsAlive(eA) || !_world.IsAlive(eB)) return;
 
-        // Grenade detonates on contact — check before FracturableBody guard.
-        Entity grEnt = _world.HasComponent<GrenadeFuse>(eA) ? eA
-                     : _world.HasComponent<GrenadeFuse>(eB) ? eB
-                     : default;
-        if (_world.IsAlive(grEnt) && _world.HasComponent<GrenadeFuse>(grEnt))
-        {
-            var fuse = _world.GetComponent<GrenadeFuse>(grEnt);
-            _bus.Publish(new GrenadeDetonateEvent(grEnt, ev.Contact.ContactPoint, fuse.WeaponKey));
-            return;
-        }
+        // Grenades (GrenadeSystem) and piercing rounds (ProjectileSystem) own their own contacts.
+        if (_world.HasComponent<PiercingRoundTag>(eA) || _world.HasComponent<PiercingRoundTag>(eB)) return;
 
         bool aIsBody = _world.HasComponent<FracturableBody>(eA);
         bool bIsBody = _world.HasComponent<FracturableBody>(eB);
         if (!aIsBody || !bIsBody) return;
-
-        // Piercing round: use weapon profile for the target, lateral-clamp the round.
-        Entity piercing = _world.HasComponent<PiercingRoundTag>(eA) ? eA
-                        : _world.HasComponent<PiercingRoundTag>(eB) ? eB
-                        : default;
-        if (_world.IsAlive(piercing))
-        {
-            Entity target = piercing == eA ? eB : eA;
-            if (_world.IsAlive(target) && _world.HasComponent<FracturableBody>(target))
-            {
-                var pt = _world.GetComponent<PiercingRoundTag>(piercing);
-                if (!_ctx.Config.Weapons.TryGetValue("piercing", out var pcfg)) return;
-                WeaponProfile pProfile = pcfg.ToWeaponProfile();
-                // Real impactor mass (the round's physical mass) — EnergyScale handles the units.
-                float pMass = pcfg.Mass ?? _ctx.Config.Fracture.BulletMass;
-                float adjMass = target == Player ? pMass * _ctx.Config.Player.PlayerImpactCoeff : pMass;
-                Vector2 pcp = ev.Contact.ContactPoint;
-                float speed = ev.ApproachSpeed;   // true PRE-solve closing speed (not the post-bounce velocity)
-
-                // The round drives a focused crack into the target …
-                FractureService.BeginFracture(_world, target, -1, pcp,
-                    pt.Direction, speed, adjMass, pProfile, _rng);
-
-                // … and takes the reciprocal impact itself (same closing speed), so it cracks/sheds
-                // on hit instead of staying inert; its own mass keeps the reduced-mass energy sane.
-                FractureService.BeginFracture(_world, piercing, -1, pcp,
-                    -pt.Direction, speed, pMass, pProfile, _rng);
-
-                // Clamp lateral velocity on the round to keep it on-axis.
-                if (_world.HasComponent<Velocity>(piercing))
-                {
-                    ref var pv = ref _world.GetComponent<Velocity>(piercing);
-                    float fwdComp = Vector2.Dot(pv.Linear, pt.Direction);
-                    Vector2 lat = pv.Linear - pt.Direction * fwdComp;
-                    float latLen = lat.Length();
-                    float maxLat = pt.LateralClamp * MathF.Abs(fwdComp);
-                    if (latLen > maxLat && latLen > 1e-4f)
-                        pv.Linear = pt.Direction * fwdComp + lat / latLen * maxLat;
-                }
-            }
-            return;
-        }
 
         var pair = eA.Id < eB.Id ? (eA.Id, eB.Id) : (eB.Id, eA.Id);
         if (_activeCollisions.Contains(pair)) return;
@@ -266,57 +251,103 @@ public sealed class FractureGameplay
         float mA = _world.GetComponent<RigidBody>(eA).Mass;
         float mB = _world.GetComponent<RigidBody>(eB).Mass;
         var frac = _ctx.Config.Fracture;
-        _ctx.Config.Weapons.TryGetValue(_ctx.Config.Player.StartingWeapon, out var wc);
         var weapon = new WeaponProfile
         {
-            Directionality = wc?.Directionality ?? 0.40f,
+            Directionality = frac.AsteroidDirectionality,
             BlastFraction  = frac.AsteroidBlastFraction,
             Knockback      = 0f,                              // bodies already exchange momentum via collision
         };
 
         Vector2 cp = ev.Contact.ContactPoint;
-        Vector2 n  = ev.Contact.Normal;   // points B→A; the crack drives into each body (+n into A, −n into B)
+        Vector2 n  = ev.Contact.Normal;   // points B→A (into A)
+
+        // Crack direction blends the contact normal with the relative-velocity direction (incl. spin),
+        // by AsteroidDirSpin: 0 = pure contact normal, 1 = pure relative velocity. "Into A" is the
+        // direction B moves relative to A at the contact; B fractures along the mirror (−dir).
+        Vector2 dir = n;
+        float dirSpin = Math.Clamp(frac.AsteroidDirSpin, 0f, 1f);
+        if (dirSpin > 0f)
+        {
+            Vector2 relIntoA = VelAtPoint(eB, cp) - VelAtPoint(eA, cp);
+            if (relIntoA.LengthSquared() > 1e-4f)
+            {
+                Vector2 blended = n * (1f - dirSpin) + Vector2.Normalize(relIntoA) * dirSpin;
+                if (blended.LengthSquared() > 1e-6f) dir = Vector2.Normalize(blended);
+            }
+        }
+
         _effects.EmitFlash(cp, 0.5f * (mA * mB / (mA + mB)) * approach * approach);
 
-        float impCoeff = _ctx.Config.Player.PlayerImpactCoeff;
+        float impCoeff = _ctx.PlayerImpactCoeff;
         float massBForA = eA == Player ? mB * impCoeff : mB;
         float massAForB = eB == Player ? mA * impCoeff : mA;
 
+        // Seed each body at the cell that actually touched (carried on the contact by the narrow
+        // phase). Without this the seed fell back to nearest-centroid and cracks started INSIDE
+        // the body while the struck face stayed intact.
         bool dashInv = IsDashInvincible();
         if (!(eA == Player && dashInv))
-            FractureService.BeginFracture(_world, eA, -1, cp, n, approach, massBForA, weapon, _rng);
+            FractureService.BeginFracture(_world, eA, ev.Contact.PartA, cp, dir, approach, massBForA, weapon, _rng);
         if (!(eB == Player && dashInv))
-            FractureService.BeginFracture(_world, eB, -1, cp, -n, approach, massAForB, weapon, _rng);
+            FractureService.BeginFracture(_world, eB, ev.Contact.PartB, cp, -dir, approach, massAForB, weapon, _rng);
+    }
+
+    // Nearest cell (by centroid) to a world point, in the body's local frame. -1 if no cells.
+    private static int NearestCellIndex(in FracturableBody fb, in Transform t, Vector2 worldPoint)
+    {
+        float cos = MathF.Cos(-t.Rotation), sin = MathF.Sin(-t.Rotation);
+        Vector2 d = worldPoint - t.Position;
+        Vector2 local = new(d.X * cos - d.Y * sin, d.X * sin + d.Y * cos);
+        int best = -1; float bestSq = float.MaxValue;
+        for (int i = 0; i < fb.Cells.Length; i++)
+        {
+            float dsq = (fb.Cells[i].Centroid - local).LengthSquared();
+            if (dsq < bestSq) { bestSq = dsq; best = i; }
+        }
+        return best;
+    }
+
+    // World-space velocity of a body at a point, including spin (ω × r). Missing Velocity = stationary.
+    private Vector2 VelAtPoint(Entity e, Vector2 worldPoint)
+    {
+        if (!_world.HasComponent<Velocity>(e)) return Vector2.Zero;
+        ref var v = ref _world.GetComponent<Velocity>(e);
+        Vector2 r = worldPoint - _world.GetComponent<Transform>(e).Position;
+        return v.Linear + new Vector2(-v.Angular * r.Y, v.Angular * r.X);
     }
 
     private void OnCellPulverized(CellPulverizedEvent ev)
     {
         _ctx.CellBudget.Remove(1);
 
-        // Score: area × material density (denser materials score more).
+        // Score: area × material toughness × weight, scaled by the live kill-chain multiplier —
+        // sustained destruction ramps the combo; a lull lets it decay (Score.Update).
         if (ev.Body != Player && _world.IsAlive(ev.Body) && _world.HasComponent<FracturableBody>(ev.Body))
         {
-            float density = _world.GetComponent<FracturableBody>(ev.Body).Material.Density;
-            _ctx.Score.Add(ev.Area * density);
+            var sc = _ctx.Config.Scoring;
+            float toughness = _world.GetComponent<FracturableBody>(ev.Body).Material.Toughness;
+            _ctx.Score.AddKill(ev.Area * toughness * sc.CellScoreAreaWeight,
+                               sc.KillChainSteps, sc.KillChainDecay);
         }
 
-        // Check if a cockpit cell was pulverized on the player entity.
-        if (ev.Body == Player && _world.IsAlive(Player) && _world.HasComponent<FracturableBody>(Player))
+        // Map the pulverized cell and disable its collider part, so projectiles and bodies pass
+        // through the crater instead of being stopped/consumed by the now-empty cell. Part index ==
+        // cell index (see VoronoiTessellator.BuildShape), and pulverized cells stay in the body.
+        if (_world.IsAlive(ev.Body) && _world.HasComponent<FracturableBody>(ev.Body)
+            && _world.HasComponent<Transform>(ev.Body))
         {
-            ref var fb = ref _world.GetComponent<FracturableBody>(Player);
-            ref var t  = ref _world.GetComponent<Transform>(Player);
-            // Transform the world centroid to body-local space to identify the cell.
-            float cos = MathF.Cos(-t.Rotation), sin = MathF.Sin(-t.Rotation);
-            Vector2 d = ev.WorldCentroid - t.Position;
-            Vector2 localPos = new(d.X * cos - d.Y * sin, d.X * sin + d.Y * cos);
-            float bestSq = float.MaxValue;
-            string? role = null;
-            for (int i = 0; i < fb.Cells.Length; i++)
+            ref var fb = ref _world.GetComponent<FracturableBody>(ev.Body);
+            ref var t  = ref _world.GetComponent<Transform>(ev.Body);
+            int cell = NearestCellIndex(fb, t, ev.WorldCentroid);
+            if (cell >= 0)
             {
-                float dsq = (fb.Cells[i].Centroid - localPos).LengthSquared();
-                if (dsq < bestSq) { bestSq = dsq; role = fb.Cells[i].Role; }
+                if (_world.HasComponent<Collider>(ev.Body)
+                    && _world.GetComponent<Collider>(ev.Body).Shape is CompoundShape cs)
+                    cs.DisablePart(cell);
+
+                // Player loses if its cockpit cell was the one pulverized.
+                if (ev.Body == Player && fb.Cells[cell].Role == "cockpit") PendingGameOver = true;
             }
-            if (role == "cockpit") PendingGameOver = true;
         }
 
         BodyColor color = GetBodyColor(ev.Body);
@@ -348,6 +379,8 @@ public sealed class FractureGameplay
         // Ephemeral bodies (the piercing round, or any TTL'd fragment of one) pass the TTL on
         // to their own shards so later crack generations also fade instead of littering the map.
         bool ephemeral = _world.HasComponent<PiercingRoundTag>(ev.Body) || _world.HasComponent<TimeToLive>(ev.Body);
+        bool isPiercing = _world.HasComponent<PiercingRoundTag>(ev.Body);
+        PiercingRoundTag parentPierce = isPiercing ? _world.GetComponent<PiercingRoundTag>(ev.Body) : default;
 
         foreach (var f in ev.Fragments)
         {
@@ -363,8 +396,8 @@ public sealed class FractureGameplay
                 if (fragCockpit)
                 {
                     _world.AddComponent(ne, origMid);
-                    _world.AddComponent(ne, new SpawnerAccumulator { Value = 0f });
                     TagAlienFragment(ne, new AlienVariant { Key = "mothership" }, 999f);
+                    MothershipPrefab.AttachBossBrain(_world, ne, _ctx);   // its own independent boss brain
                 }
             }
             else if (isAlien)
@@ -372,6 +405,10 @@ public sealed class FractureGameplay
                 // Only a fragment that still carries a cockpit cell remains a steerable,
                 // shooting alien; cockpit-less pieces become inert asteroid-layer debris.
                 if (fragCockpit) TagAlienFragment(ne, origAv, 0f);
+            }
+            else if (isPiercing)
+            {
+                TagPiercingFragment(ne, parentPierce);
             }
             else
             {
@@ -404,6 +441,8 @@ public sealed class FractureGameplay
             : new VortexResponse { CentripetalMult = 1f, TangentialMult = 1f };
         bool cockpitFound = false;
         bool ephemeral = _world.HasComponent<PiercingRoundTag>(ev.Body) || _world.HasComponent<TimeToLive>(ev.Body);
+        bool isPiercing = _world.HasComponent<PiercingRoundTag>(ev.Body);
+        PiercingRoundTag parentPierce = isPiercing ? _world.GetComponent<PiercingRoundTag>(ev.Body) : default;
 
         foreach (var p in ev.Pieces)
         {
@@ -420,13 +459,17 @@ public sealed class FractureGameplay
                 if (fragCockpit)
                 {
                     _world.AddComponent(ne, origMid);
-                    _world.AddComponent(ne, new SpawnerAccumulator { Value = 0f });
                     TagAlienFragment(ne, new AlienVariant { Key = "mothership" }, 999f);
+                    MothershipPrefab.AttachBossBrain(_world, ne, _ctx);   // its own independent boss brain
                 }
             }
             else if (isAlien)
             {
                 if (fragCockpit) TagAlienFragment(ne, origAv, 0f);
+            }
+            else if (isPiercing)
+            {
+                TagPiercingFragment(ne, parentPierce);
             }
             else
             {

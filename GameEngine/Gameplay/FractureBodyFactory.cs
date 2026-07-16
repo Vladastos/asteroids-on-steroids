@@ -54,6 +54,22 @@ public static class FractureBodyFactory
             Layer = ghost ? GameLayers.Ghost : GameLayers.Asteroid,
             Mask  = ghost ? 0 : (GameLayers.Asteroid | GameLayers.Player),
         });
+        // Bake per-cell colours once for a fresh body; fragments already carry their cells' colours
+        // (FillColor travels through fracture), so they aren't re-baked and never recolour on damage.
+        if (body.Cells.Length > 0 && body.Cells[0].FillColor.A == 0)
+            CellColorizer.Apply(body, color);
+
+        // Fragile = a small crumb (total area < MinFragmentArea) with no cockpit: any fracture one-shots
+        // it. Cockpit bodies (live ships) are exempt; piercing pieces exempt via material MinFragmentArea 0.
+        float totalArea = 0f;
+        bool  hasCockpit = false;
+        for (int i = 0; i < body.Cells.Length; i++)
+        {
+            totalArea += body.Cells[i].Area;
+            if (body.Cells[i].Role == "cockpit") hasCockpit = true;
+        }
+        body.Fragile = !hasCockpit && totalArea < body.Material.MinFragmentArea;
+
         world.AddComponent(e, body);
         world.AddComponent(e, color);
         var (outline, cracks) = FractureMesh.ComputeEdges(body.Cells, body.Bonds);

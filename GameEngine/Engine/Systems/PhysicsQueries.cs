@@ -67,4 +67,28 @@ public static class PhysicsQueries
         hit = bestHit;
         return found;
     }
+
+    /// <summary>True if a circle (centre + radius) overlaps any existing collider on
+    /// <paramref name="layerMask"/>. Conservative (tests the circle against each collider's AABB), so
+    /// it may reject a near-miss — ideal for spawn placement, where the cost of overlap (stuck/jitter)
+    /// far outweighs an occasional retry. Disabled colliders are ignored.</summary>
+    public static bool OverlapsCircle(World world, Vector2 centre, float radius, int layerMask)
+    {
+        bool hit = false;
+        float r2 = radius * radius;
+        world.ForEach<Transform, Collider>((Entity e, ref Transform t, ref Collider c) =>
+        {
+            if (hit) return;
+            if ((c.Layer & layerMask) == 0) return;
+            if (world.HasComponent<DisabledTag>(e)) return;
+
+            var (min, max) = c.Shape.GetAABB(t.Position, t.Rotation);
+            // Closest point on the AABB to the circle centre.
+            float cx = Math.Clamp(centre.X, min.X, max.X);
+            float cy = Math.Clamp(centre.Y, min.Y, max.Y);
+            float dx = centre.X - cx, dy = centre.Y - cy;
+            if (dx * dx + dy * dy < r2) hit = true;
+        });
+        return hit;
+    }
 }

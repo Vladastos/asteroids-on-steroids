@@ -17,4 +17,7 @@ public struct Bond
     public float Stress;       // runtime damage accumulator: delivered stress sums here; the bond
                                // breaks at Stress ≥ Strength and decays by RelaxRate (StressRelaxSystem).
                                // Lets repeated hits accumulate (sustained fire cracks a tough body).
+    public bool  Broken;       // set once the bond breaks (Stress ≥ effective strength) and never
+                               // cleared — a permanent crack. Distinct from Stress, which relaxes;
+                               // spin can break a bond below Strength, so this is the true break signal.
 }

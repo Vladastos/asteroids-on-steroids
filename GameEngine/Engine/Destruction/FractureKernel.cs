@@ -19,6 +19,23 @@ public static class FractureTuning
     public static float TumbleScale         = 220f;   // fling-asymmetry → fragment spin gain
     public static float FragmentSpinMax     = 3.5f;   // clamp on a fragment's spin (rad/s)
     public static float SpinProfileBase     = 0.3f;   // spin pre-stress at the centre; rises to 1.0 at the rim
+
+    public static float SplitStressInherit  = 1.0f;   // fraction of Cell.Damage / Bond.Stress fragments keep on split (0 = old full-heal)
+
+    // ── Impact-velocity → crack-speed coupling ─────────────────────────────────
+    public static float CrackSpeedRefVelocity = 600f;  // px/s at which a hit cracks at the material's base CrackSpeed
+    public static float CrackSpeedVelExponent = 0.5f;  // curve: 0 = velocity-independent, 1 = linear in speed
+    public static float CrackSpeedMultMin     = 0.25f; // slowest a crawl-speed impact can crack (× material)
+    public static float CrackSpeedMultMax     = 4f;    // fastest a screaming impact can crack (× material)
+
+    /// <summary>Crack-speed multiplier for a hit at <paramref name="normalSpeed"/>: fast collisions
+    /// fracture faster than slow-but-heavy ones even at equal energy. ≤0 (speed unknown) = 1.</summary>
+    public static float CrackSpeedFactor(float normalSpeed)
+    {
+        if (normalSpeed <= 0f || CrackSpeedVelExponent <= 0f) return 1f;
+        float g = MathF.Pow(normalSpeed / MathF.Max(1f, CrackSpeedRefVelocity), CrackSpeedVelExponent);
+        return Math.Clamp(g, CrackSpeedMultMin, CrackSpeedMultMax);
+    }
 }
 
 /// <summary>
@@ -39,12 +56,24 @@ public sealed class CrackFront
     public float   BlastFraction;      // weapon: vaporize budget fraction
     internal readonly List<(int bk, int j, float wc, float wd)> Out = new();   // reused scratch
 
+    // Per-FRONT pacing (material CrackSpeed × the hit's velocity factor): each hit's crack advances
+    // on its own clock, so a fast bullet's front races while a slow grinding contact's front creeps —
+    // even when both are live on the same body.
+    public int StepsPerIteration  = 1;
+    public int FramesPerIteration = 1;
+    public int FrameCounter;
+
     public bool Active => Frontier.Count > 0;
 
-    /// <summary>Seed a front at the struck cell over the given (per-front) energy array.</summary>
+    /// <summary>Seed a front at the struck cell over the given (per-front) energy array.
+    /// <paramref name="normalSpeed"/> scales the material's CrackSpeed via
+    /// <see cref="FractureTuning.CrackSpeedFactor"/> (≤0 = material base pace).</summary>
     public static CrackFront Seed(float[] energy, int struck, float startEnergy,
-        Vector2 impactDirLocal, float directionality, float brittleness, float blastFraction)
+        Vector2 impactDirLocal, float directionality, float brittleness, float blastFraction,
+        float crackSpeed, float normalSpeed = 0f)
     {
+        var timing = FractureTiming.FromCrackSpeed(
+            crackSpeed * FractureTuning.CrackSpeedFactor(normalSpeed), FractureTiming.DefaultFixedDt);
         var f = new CrackFront
         {
             Energy = energy,
@@ -54,6 +83,8 @@ public sealed class CrackFront
             Directionality = directionality,
             Brittleness = brittleness,
             BlastFraction = blastFraction,
+            StepsPerIteration = timing.StepsPerIteration,
+            FramesPerIteration = timing.FramesPerIteration,
         };
         for (int i = 0; i < f.Processed.Length; i++) { f.Processed[i] = -1f; f.Parent[i] = -1; }
         energy[struck] = startEnergy;
@@ -156,14 +187,19 @@ public static class FractureKernel
 
         // DAMAGE pass: each bond is directed transmit·wd/W, but a break only CONSUMES what it needs
         // (its Strength = surface energy); the over-damage is recovered and continues forward.
+        // Spin doesn't change a bond's Strength — instead it multiplies the DAMAGE each unit of energy
+        // inflicts, so a spinning body's bonds accumulate stress faster (energy stays conserved: the
+        // energy consumed is still what physically breaks the bond).
         float recovered = 0f;
         foreach (var (bk, j, wc, wd) in outBonds)
         {
             float absorb = transmit * wd / W;
-            float effStr = bonds[bk].Strength / spinMul[bk];          // spin lowers the break threshold
-            float consumed = MathF.Min(absorb, MathF.Max(0f, effStr - bonds[bk].Stress));
-            bonds[bk].Stress += consumed;
-            if (bonds[bk].Stress >= effStr - 1e-4f) broken[bk] = true;
+            float str    = bonds[bk].Strength;                       // fixed; spin no longer scales it
+            float spin   = MathF.Max(1e-4f, spinMul[bk]);            // damage multiplier
+            float need     = MathF.Max(0f, (str - bonds[bk].Stress) / spin);   // energy still needed
+            float consumed = MathF.Min(absorb, need);
+            bonds[bk].Stress += consumed * spin;                     // damage = energy × spin
+            if (bonds[bk].Stress >= str - 1e-4f) { broken[bk] = true; bonds[bk].Broken = true; }
             recovered += absorb - consumed;
         }
         // FORWARD = conduct budget + recovered over-damage, distributed by conduct weight.

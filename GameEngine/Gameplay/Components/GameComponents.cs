@@ -6,6 +6,8 @@ namespace AsteroidsGame.Components;
 
 public struct TimeToLive    { public float Remaining; }
 public struct ShootCooldown { public float Remaining; }
+/// <summary>Per-alien skill cooldown tracker (e.g. the bruiser dash). DashCd counts down to 0 = ready.</summary>
+public struct AlienSkillState { public float DashCd; }
 public struct AimComponent  { public Vector2 Dir; }
 
 /// <summary>Fill and outline colours for a fracturable body.</summary>
@@ -29,7 +31,26 @@ public struct GrenadeFuse { public float Remaining; public string WeaponKey; }
 /// <summary>Marker on piercing round bodies. Carries aim direction for lateral clamp, and a
 /// brief PlayerGrace countdown (seconds) during which the round ignores the player layer so
 /// it can clear the firing ship's shape before colliding with it normally.</summary>
-public struct PiercingRoundTag { public Vector2 Direction; public float LateralClamp; public float PlayerGrace; }
+/// <summary>
+/// A piercing body's terminal-ballistics state. <see cref="Power"/> is its remaining penetration
+/// budget, set once at spawn from the body's own kinetic energy (<see cref="PowerPerKE"/> is the
+/// weapon's KE→power exchange rate, fixed at fire so shards recompute theirs from their own mass
+/// and fling speed) and spent per cell crossed; <see cref="Power0"/> is the spawn value, kept so
+/// speed can fade as the budget drains. <see cref="LastTarget"/>/<see cref="LastCell"/> remember
+/// the cell the round is currently sitting inside, so a sensor contact that re-fires every frame
+/// doesn't re-charge for the same cell.
+/// </summary>
+public struct PiercingRoundTag
+{
+    public Vector2 Direction;
+    public float   LateralClamp;
+    public float   PlayerGrace;
+    public float   Power;
+    public float   Power0;
+    public float   PowerPerKE;
+    public Entity  LastTarget;
+    public int     LastCell;
+}
 
 /// <summary>Cooldown state for all three player skills.</summary>
 public struct SkillState
@@ -77,3 +98,18 @@ public struct SpawnerAccumulator { public float Value; }
 
 /// <summary>Marker on black hole projectile entities. Carries attraction parameters set at spawn.</summary>
 public struct BlackHoleTag { public float Radius; public float Strength; public float CrushRadius; }
+
+/// <summary>A transient expanding-ring visual (e.g. the boss shockwave). Uses TimeToLive for lifetime;
+/// the ring radius grows from 0 to MaxRadius over MaxAge.</summary>
+public struct ShockwaveRing { public float MaxAge; public float MaxRadius; }
+
+/// <summary>Per-cockpit-fragment boss controller state. Each cockpit-bearing mothership fragment is an
+/// independent boss driven by BossSystem, acting on its own attached cells. Skill cooldowns weaken
+/// (lengthen) as its "skill" cells are pulverised; a fragment that loses its cockpit becomes inert.</summary>
+public struct BossBrain
+{
+    public float ShockwaveCd, BlackHoleCd, RamCd, BarrageCd, SpawnCd;
+    public float RamActive;          // seconds of ram lunge remaining
+    public int   MaxSkillCells;      // "skill"-role cells at creation, for cooldown weakening
+    public int   MaxSpawnerCells;    // "spawner"-role cells at creation, for spawn-rate weakening
+}

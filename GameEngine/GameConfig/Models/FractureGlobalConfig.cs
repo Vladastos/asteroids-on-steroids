@@ -35,8 +35,24 @@ public class FractureGlobalConfig
     /// <summary>Spin pre-stress at the body centre; rises to 1.0 at the rim.</summary>
     public float SpinProfileBase { get; set; } = 0.3f;
 
+    /// <summary>Fraction of accumulated Cell.Damage / Bond.Stress fragments keep when a body splits.
+    /// 1 = full inheritance (fragmentation never heals the survivors); 0 = the old fresh-fragment
+    /// behaviour. Dial down if worn fragments end up too fragile.</summary>
+    public float SplitStressInherit { get; set; } = 1.0f;
+
+    // ── Impact-velocity → crack-speed coupling ──────────────────────────────────
+    /// <summary>Impact speed (px/s) at which a hit cracks at the material's base CrackSpeed. Faster
+    /// hits crack faster, slower ones slower (clamped ×0.25 … ×4), so a fast bullet shatters snappily
+    /// while a slow heavy grind creeps — even at equal energy.</summary>
+    public float CrackSpeedRefVelocity { get; set; } = 600f;
+    /// <summary>Curve of that coupling: 0 = velocity-independent (old behaviour), 1 = linear in speed.</summary>
+    public float CrackSpeedVelExponent { get; set; } = 0.5f;
+
     // ── Asteroid-on-asteroid collision fracture ────────────────────────────────
     public float AsteroidBlastFraction { get; set; } = 0.08f;
+    /// <summary>WeaponProfile directionality for collision fractures: 0 = omnidirectional blast,
+    /// 1 = tight forward channel. Previously borrowed from the player's cannon; now its own knob.</summary>
+    public float AsteroidDirectionality { get; set; } = 0.40f;
     /// <summary>0 = crack direction is pure contact normal; 1 = pure relative velocity (including spin).</summary>
     public float AsteroidDirSpin { get; set; } = 1.0f;
     /// <summary>Minimum approach speed for an asteroid↔asteroid contact to fracture.</summary>

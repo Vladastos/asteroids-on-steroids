@@ -12,11 +12,27 @@ public class GameConfig
     public List<WaveDefinition>                Waves      { get; set; } = new();
     public ScoringConfig                       Scoring    { get; set; } = new();
     public WorldConfig                         World      { get; set; } = new();
+    public BorderHazardConfig                  BorderHazard { get; set; } = new();
     public VortexConfig                        Vortex     { get; set; } = new();
     public WaveSystemConfig                    WaveSystem { get; set; } = new();
     public VfxConfig                           Vfx        { get; set; } = new();
     public FractureGlobalConfig                Fracture   { get; set; } = new();
     public PhysicsConfig                       Physics    { get; set; } = new();
+    public List<DifficultyConfig>              Difficulties { get; set; } = new();
+}
+
+/// <summary>A named difficulty preset: a set of multipliers layered over the base tuning at run start.</summary>
+public class DifficultyConfig
+{
+    public string Name             { get; set; } = "Normal";
+    /// <summary>Scales the per-wave spawn budget (more/denser enemy waves).</summary>
+    public float  BudgetMult       { get; set; } = 1f;
+    /// <summary>Scales the live-cell cap growth (bigger battles allowed).</summary>
+    public float  CapMult          { get; set; } = 1f;
+    /// <summary>Scales alien fire cooldown (below 1 = faster fire = harder).</summary>
+    public float  EnemyFireMult    { get; set; } = 1f;
+    /// <summary>Scales damage the player takes (via PlayerImpactCoeff).</summary>
+    public float  PlayerDamageMult { get; set; } = 1f;
 }
 
 public class ScoringConfig

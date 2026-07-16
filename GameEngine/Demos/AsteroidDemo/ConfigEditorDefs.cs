@@ -49,7 +49,12 @@ static class ConfigEditorDefs
             .Slider(f => f.SpinCap,             "Spin Cap",         0f,      10f)
             .Slider(f => f.SpinProfileBase,     "Spin Profile Base", 0f,     1f)
             .Separator()
+            .Slider(f => f.CrackSpeedRefVelocity, "CrkSpd Ref Vel",  50f,    3000f, "0")
+            .Slider(f => f.CrackSpeedVelExponent, "CrkSpd Vel Exp",  0f,     2f)
+            .Slider(f => f.SplitStressInherit,  "Split Inherit",    0f,      1f)
+            .Separator()
             .Slider(f => f.AsteroidBlastFraction, "Ast. Blast Frac.", 0f,    1f)
+            .Slider(f => f.AsteroidDirectionality, "Ast. Directionality", 0f, 1f)
             .Slider(f => f.AsteroidDirSpin,     "Ast. Dir Spin",    0f,      1f)
             .Slider(f => f.AsteroidCollisionThreshold, "Ast. Collide Thr.", 0f, 200f, "0");
 
@@ -76,6 +81,7 @@ static class ConfigEditorDefs
             .Slider(p => p.Roughness,          "Roughness",        0f,     0.6f)
             .Slider(p => p.NoiseFrequency,     "Noise Freq.",      0.5f,   8f)
             .Slider(p => p.ConcavityBias,      "Concavity Bias",   0f,     0.4f)
+            .SliderInt("Relax Iters", p => p.RelaxIterations, (p, v) => p.RelaxIterations = v, 0, 6)
             .Separator()
             .SliderInt(p => p.ClusterCount,    "Clusters",         0,      12)
             .Slider(p => p.ClusterCentrality,  "Centrality",       0f,     1f)

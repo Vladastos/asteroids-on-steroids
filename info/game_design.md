@@ -367,8 +367,14 @@ At wave 10 (around 4 minutes in): 20/25 asteroids spawn, suppose: 10 gravel, 7 s
 
 ### To do
 
-No more tuner: everything synced with game_config file. Lots of more hardcoded parameters need to be there.
+Make aliens be normal part of the wave system. The wave system constrains the weights to sum up to one? if so i would like them to have absolute weight values and they're normalised by the wave system.
 
-Make the map bigger? 
+Special waves that trigger at specific timestamps, with their own independent weights, budgets and banner.
 
-Health system, new weapons, new skills.
+The player's cells shouldn't change color, the broken bonds are visible thanks to the cracks that form and the HUD widget handles the cell damage, so there's no need for the colors to change.
+
+Add the rotation speed parameter of aliens to game_config.
+
+Background: I'm thinking of 2 (or more) different space backgrounds that move at different speeds with the player, so it gives the illusion of depth. What do you think?
+
+the score points need to be bigger now that the 

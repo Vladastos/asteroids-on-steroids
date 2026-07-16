@@ -106,6 +106,7 @@ while (!window.ShouldClose)
     if (!editor.IsTextInputActive)
     {
         if (input.IsPressed(KeyCode.N)) session.ForceNextWave();
+        if (input.IsPressed(KeyCode.M)) session.SpawnMothership();
         if (input.IsPressed(KeyCode.LeftBracket))  session.GameTime = MathF.Max(0f, session.GameTime - 60f);
         if (input.IsPressed(KeyCode.RightBracket)) session.GameTime += 60f;
     }
@@ -207,6 +208,14 @@ sealed class DemoSession
         SpawnNextWave();
         _waveTimer = 0f;
     }
+
+    /// <summary>Spawns the mothership boss near the player for playtesting (BossSystem drives it).</summary>
+    public void SpawnMothership()
+    {
+        Vector2 at = WorldCenter + new Vector2(500f, 0f);
+        int gid = _fracture.AllocateGroupId();
+        MothershipPrefab.Spawn(_world, _ctx, _rng, at, Vector2.Zero, gid, out _);
+    }
     public string BannerLine1 => _bannerLine1;
     public string BannerLine2 => _bannerLine2;
     public string BannerLine3 => _bannerLine3;
@@ -234,18 +243,21 @@ sealed class DemoSession
                 OnPiercingFire = (from, dir) => PiercingPrefab.Spawn(_world, _ctx, from, dir, _rng),
             },
             new AlienAiSystem(_ctx, _bus, _rng),
+            new BossSystem(_ctx, _effects, _camera, _rng, () => _fracture.Player),
             new PhysicsSystem(),
-            new VortexSystem(WorldCenter, gc.Vortex),
+            new VortexSystem(WorldCenter, GameConst.WorldW, GameConst.WorldH, gc.Vortex),
             new MovementSystem(),
-            new BorderDampSystem(GameConst.WorldW, GameConst.WorldH),
+            new BorderHazardSystem(GameConst.WorldW, GameConst.WorldH, gc.BorderHazard, _rng),
             new RaycastBulletSystem(_bus, _fx, _rng),
-            new GrenadeSystem(_bus),
+            new GrenadeSystem(_world, _bus),
+            new ProjectileSystem(_world, _ctx, _bus, _rng, () => _fracture.Player),
             new GhostSystem(),
             new CollisionSystem(new SpatialGrid(160f), _bus) { ResolveOverlap = true, EnableSleeping = false },
+            new EventFlushSystem(_bus),        // impacts in, BEFORE the crack system (see PlayingState)
             new FractureCrackSystem(_bus, _rng),
             new FractureGroupSystem(),
             new StressRelaxSystem(),
-            new EventFlushSystem(_bus),
+            new EventFlushSystem(_bus),        // …crack output out (pulverise / split / complete)
             new TimeToLiveSystem(),
         };
 

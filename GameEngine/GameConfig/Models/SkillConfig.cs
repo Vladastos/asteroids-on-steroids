@@ -19,4 +19,7 @@ public class SkillConfig
     // ── SlowMo ───────────────────────────────────────────────────────────────
     public float? TimeScale        { get; set; }
     public float? PlayerSpeedBoost { get; set; }
+    /// <summary>Multiplies the player's aim rotation speed while slow-mo is active, so aim stays
+    /// responsive against the scaled-down dt (needs to exceed 1/TimeScale to feel faster than normal).</summary>
+    public float? RotSpeedBoost    { get; set; }
 }

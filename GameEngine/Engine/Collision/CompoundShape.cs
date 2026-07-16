@@ -23,8 +23,20 @@ public sealed class CompoundShape : CollisionShape
     private readonly CollisionShape[]              _parts;
     private readonly (Vector2 min, Vector2 max)[]  _localAabbs;   // per-part, compound-local
     private readonly (Vector2 min, Vector2 max)    _localBounds;  // union (for O(1) GetAABB)
+    private readonly bool[]                         _disabled;     // pulverized cells: skipped by all tests
 
     public int PartCount => _parts.Length;
+
+    /// <summary>Permanently removes a part from collision (e.g. its cell pulverized into a crater):
+    /// every intersection/raycast/manifold test skips it, so projectiles and bodies pass through the
+    /// hole. Idempotent; out-of-range indices are ignored.</summary>
+    public void DisablePart(int index)
+    {
+        if ((uint)index < (uint)_disabled.Length) _disabled[index] = true;
+    }
+
+    public bool IsPartDisabled(int index) =>
+        (uint)index < (uint)_disabled.Length && _disabled[index];
 
     /// <summary>
     /// Index into _parts of the child that produced the deepest contact in the
@@ -36,6 +48,7 @@ public sealed class CompoundShape : CollisionShape
     {
         if (parts.Length == 0) throw new ArgumentException("CompoundShape needs at least one part.");
         _parts = parts;
+        _disabled = new bool[parts.Length];
 
         _localAabbs = new (Vector2, Vector2)[parts.Length];
         var bmin = new Vector2(float.MaxValue);
@@ -106,7 +119,7 @@ public sealed class CompoundShape : CollisionShape
         LastHitPartIndex = -1;
         for (int i = 0; i < _parts.Length; i++)
         {
-            if (!Overlaps(_localAabbs[i], qmin, qmax)) continue;
+            if (_disabled[i] || !Overlaps(_localAabbs[i], qmin, qmax)) continue;
             var c = _parts[i].Intersects(posA, rotA, other, posB, rotB);
             if (c != null && (deepest == null || c.Value.Depth > deepest.Value.Depth))
             {
@@ -135,15 +148,20 @@ public sealed class CompoundShape : CollisionShape
         float cos = MathF.Cos(rotA), sin = MathF.Sin(rotA);
         for (int i = 0; i < _parts.Length; i++)
         {
-            if (!Overlaps(_localAabbs[i], qmin, qmax)) continue;
+            if (_disabled[i] || !Overlaps(_localAabbs[i], qmin, qmax)) continue;
             var c = _parts[i].Intersects(posA, rotA, other, posB, rotB);
             if (c == null) continue;
+
+            // Which cell of the OTHER body did this part touch? A compound records the deepest
+            // part it matched during the test just above, so both sides of the contact are known
+            // and fracture can seed the cell actually struck rather than guessing from the point.
+            int otherPart = other is CompoundShape oc ? oc.LastHitPartIndex : -1;
 
             var (amin, amax) = _localAabbs[i];
             Vector2 lc = (amin + amax) * 0.5f;                       // cell centre (local)
             Vector2 cellWorld = new(lc.X * cos - lc.Y * sin + posA.X,
                                     lc.X * sin + lc.Y * cos + posA.Y);
-            var ci = c.Value;
+            var ci = c.Value.WithParts(i, otherPart);
             if (Vector2.Dot(ci.Normal, posB - cellWorld) < 0f) ci = ci.Flipped();
             outList.Add(ci);
         }
@@ -165,6 +183,76 @@ public sealed class CompoundShape : CollisionShape
                 Vector2.Max(Vector2.Max(c0, c1), Vector2.Max(c2, c3)));
     }
 
+    /// <summary>
+    /// Every part the world-space segment from→to passes through, ordered by entry distance along
+    /// it. Unlike <see cref="Raycast"/> (which stops at the nearest part) this reports the whole
+    /// tunnel, so a penetrating projectile can act on each cell it crosses, in order. A part that
+    /// already contains <paramref name="from"/> is reported at T = 0. Disabled parts are skipped.
+    /// </summary>
+    public void SegmentParts(Vector2 pos, float rot, Vector2 from, Vector2 to,
+                             List<(int Part, float T, Vector2 Point)> outList)
+    {
+        outList.Clear();
+
+        // Work in compound-local space: un-translate then un-rotate both endpoints once.
+        float cos = MathF.Cos(rot), sin = MathF.Sin(rot);
+        Vector2 ToLocal(Vector2 w)
+        {
+            Vector2 d = w - pos;
+            return new Vector2(d.X * cos + d.Y * sin, -d.X * sin + d.Y * cos);
+        }
+        Vector2 p0 = ToLocal(from), p1 = ToLocal(to);
+        Vector2 seg = p1 - p0;
+        if (seg.LengthSquared() < 1e-12f) return;
+
+        Vector2 segMin = Vector2.Min(p0, p1), segMax = Vector2.Max(p0, p1);
+
+        for (int i = 0; i < _parts.Length; i++)
+        {
+            if (_disabled[i]) continue;
+            if (!Overlaps(_localAabbs[i], segMin, segMax)) continue;
+            if (_parts[i] is not PolygonShape poly) continue;
+
+            var verts = poly.LocalVertices;
+            if (verts.Length < 3) continue;
+
+            float t = SegmentEntryT(verts, p0, seg);
+            if (t < 0f) continue;
+            outList.Add((i, t, from + (to - from) * t));
+        }
+
+        outList.Sort(static (a, b) => a.T.CompareTo(b.T));
+    }
+
+    /// <summary>Parameter t ∈ [0,1] at which the segment p0+seg·t first enters the polygon, or 0 if
+    /// p0 is already inside it. -1 when the segment misses entirely.</summary>
+    private static float SegmentEntryT(ReadOnlySpan<Vector2> verts, Vector2 p0, Vector2 seg)
+    {
+        // Inside at the start → it is already in this cell.
+        bool inside = false;
+        for (int i = 0, j = verts.Length - 1; i < verts.Length; j = i++)
+        {
+            if ((verts[i].Y > p0.Y) != (verts[j].Y > p0.Y) &&
+                p0.X < (verts[j].X - verts[i].X) * (p0.Y - verts[i].Y) / (verts[j].Y - verts[i].Y) + verts[i].X)
+                inside = !inside;
+        }
+        if (inside) return 0f;
+
+        // Otherwise the earliest edge crossing within the segment.
+        float best = float.MaxValue;
+        for (int i = 0, j = verts.Length - 1; i < verts.Length; j = i++)
+        {
+            Vector2 a = verts[j], e = verts[i] - a;
+            float denom = seg.X * e.Y - seg.Y * e.X;      // cross(seg, edge)
+            if (MathF.Abs(denom) < 1e-9f) continue;        // parallel
+            Vector2 ap = a - p0;
+            float t = (ap.X * e.Y - ap.Y * e.X) / denom;         // along the segment
+            float u = (ap.X * seg.Y - ap.Y * seg.X) / denom;     // along the edge
+            if (t >= 0f && t <= 1f && u >= 0f && u <= 1f && t < best) best = t;
+        }
+        return best <= 1f ? best : -1f;
+    }
+
     public override bool Raycast(Vector2 origin, Vector2 dir, float maxDist,
                                  Vector2 pos, float rot, out RayCastResult hit)
     {
@@ -173,6 +261,7 @@ public sealed class CompoundShape : CollisionShape
         float best = maxDist;
         for (int i = 0; i < _parts.Length; i++)
         {
+            if (_disabled[i]) continue;
             if (_parts[i].Raycast(origin, dir, best, pos, rot, out var h))
             {
                 best = h.Distance;
@@ -198,7 +287,7 @@ public sealed class CompoundShape : CollisionShape
         LastHitPartIndex = -1;
         for (int i = 0; i < _parts.Length; i++)
         {
-            if (!Overlaps(_localAabbs[i], qmin, qmax)) continue;
+            if (_disabled[i] || !Overlaps(_localAabbs[i], qmin, qmax)) continue;
             var c = _parts[i].IntersectsCircle(posA, rotA, circle, posB);
             if (c != null && (deepest == null || c.Value.Depth > deepest.Value.Depth))
             {
@@ -220,7 +309,7 @@ public sealed class CompoundShape : CollisionShape
         LastHitPartIndex = -1;
         for (int i = 0; i < _parts.Length; i++)
         {
-            if (!Overlaps(_localAabbs[i], qmin, qmax)) continue;
+            if (_disabled[i] || !Overlaps(_localAabbs[i], qmin, qmax)) continue;
             var c = _parts[i].IntersectsPolygon(posA, rotA, polygon, posB, rotB);
             if (c != null && (deepest == null || c.Value.Depth > deepest.Value.Depth))
             {
@@ -241,7 +330,7 @@ public sealed class CompoundShape : CollisionShape
         LastHitPartIndex = -1;
         for (int i = 0; i < _parts.Length; i++)
         {
-            if (!Overlaps(_localAabbs[i], qmin, qmax)) continue;
+            if (_disabled[i] || !Overlaps(_localAabbs[i], qmin, qmax)) continue;
             var c = _parts[i].IntersectsAABB(posA, rotA, aabb, posB);
             if (c != null && (deepest == null || c.Value.Depth > deepest.Value.Depth))
             {

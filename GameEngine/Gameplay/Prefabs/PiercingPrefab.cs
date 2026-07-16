@@ -36,16 +36,34 @@ public static class PiercingPrefab
         var e = FractureBodyFactory.Spawn(world, ctx.Config.Physics, body, pos, rot,
             aimDir * speed, 0f, mass, inertia,
             new BodyColor { Fill = new Color(58, 60, 66), Outline = new Color(120, 124, 132) });
+        // Penetration budget: PenetrationPower is rated for THIS round at full ProjectileSpeed, so
+        // the KE→power exchange rate is fixed here at fire — shards then recompute their own budget
+        // from their own mass and fling speed with the same rate.
+        float ke         = 0.5f * mass * speed * speed;
+        float power      = wcfg.PenetrationPower ?? 0f;
+        float powerPerKE = ke > 1e-6f ? power / ke : 0f;
+
         // The round spawns inside the firing ship; ignore the player layer just long enough
         // (PlayerGrace) for the round to clear the ship's shape, then collide with it normally.
         // 170px round at ProjectileSpeed clears in ~0.07s; 0.15s leaves margin.
-        world.AddComponent(e, new PiercingRoundTag { Direction = aimDir, LateralClamp = clamp, PlayerGrace = 0.15f });
+        world.AddComponent(e, new PiercingRoundTag
+        {
+            Direction  = aimDir, LateralClamp = clamp, PlayerGrace = 0.15f,
+            Power      = power, Power0 = power, PowerPerKE = powerPerKE,
+            LastTarget = default, LastCell = -1,
+        });
         world.AddComponent(e, new TimeToLive { Remaining = wcfg.TimeToLive });
         if (world.HasComponent<Collider>(e))
         {
             ref var col = ref world.GetComponent<Collider>(e);
             col.Layer = GameLayers.Bullet;
-            col.Mask = GameLayers.Asteroid | GameLayers.Alien;   // PlayerGrace adds Player back once clear
+            // Ghost included: fresh fracture fragments must still be pierceable, or a splitting
+            // asteroid's pieces are untouchable for their ghost window and the round skips them.
+            col.Mask = GameLayers.Asteroid | GameLayers.Alien | GameLayers.Ghost;   // PlayerGrace adds Player back once clear
+            // Sensor: the round is detected (CollisionEvent still fires → ProjectileSystem) but the
+            // solver applies no separation/impulse, so it physically passes through. Speed loss and
+            // target push are modelled explicitly in ProjectileSystem.
+            col.Sensor = true;
         }
         // High angular drag prevents uncontrolled spin after glancing impacts.
         if (world.HasComponent<RigidBody>(e))

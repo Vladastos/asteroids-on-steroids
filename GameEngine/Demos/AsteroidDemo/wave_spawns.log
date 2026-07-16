@@ -1,24 +1,23 @@
-# Wave spawn log — started 2026-06-29 11:48:40
+# Wave spawn log — started 2026-07-02 14:50:43
 
 [Wave 1] T=0.0s   budget=20   sizeBias=-0.20   maxCells=300
   4 asteroids   ~186 cells total
   unstable   x3   sizes: 1.12 1.15 1.53   cells: ~47 ~49 ~88   subtotal≈184
   gravel     x1   sizes: 0.81   cells: ~2   subtotal≈2
 
-[Wave 2] T=302.6s   budget=70   sizeBias=+0.20   maxCells=600
-  11 asteroids   ~404 cells total   3 aliens
-  armored    x2   sizes: 0.82 1.16   cells: ~5 ~11   subtotal≈16
-  spinner    x3   sizes: 1.64 1.75 1.00   cells: ~27 ~31 ~10   subtotal≈68
-  standard   x1   sizes: 1.35   cells: ~24   subtotal≈24
-  unstable   x4   sizes: 1.03 1.31 0.96 1.92   cells: ~39 ~64 ~35 ~139   subtotal≈277
-  gravel     x1   sizes: 2.44   cells: ~19   subtotal≈19
-  drone      ×3 (alien)
+[Wave 2] T=14.6s   budget=20   sizeBias=-0.18   maxCells=300
+  7 asteroids   ~137 cells total
+  standard   x3   sizes: 1.98 1.07 1.74   cells: ~52 ~15 ~40   subtotal≈107
+  gravel     x4   sizes: 0.56 2.07 2.06 0.53   cells: ~1 ~14 ~14 ~1   subtotal≈30
 
-[Wave 3] T=324.3s   budget=70   sizeBias=+0.23   maxCells=600
-  10 asteroids   ~337 cells total   3 aliens
-  standard   x2   sizes: 1.04 1.91   cells: ~14 ~48   subtotal≈62
-  boulder    x3   sizes: 1.35 1.16 1.26   cells: ~46 ~33 ~39   subtotal≈118
-  armored    x1   sizes: 1.44   cells: ~17   subtotal≈17
-  unstable   x3   sizes: 1.49 0.87 0.87   cells: ~83 ~28 ~28   subtotal≈139
-  gravel     x1   sizes: 0.52   cells: ~1   subtotal≈1
-  drone      ×3 (alien)
+[Wave 3] T=31.1s   budget=25   sizeBias=-0.16   maxCells=315
+  8 asteroids   ~136 cells total
+  gravel     x5   sizes: 0.79 2.24 1.38 1.20 0.73   cells: ~2 ~16 ~6 ~4 ~1   subtotal≈29
+  boulder    x1   sizes: 1.02   cells: ~26   subtotal≈26
+  standard   x2   sizes: 1.57 1.93   cells: ~32 ~49   subtotal≈81
+
+[Wave 4] T=47.6s   budget=25   sizeBias=-0.14   maxCells=315
+  7 asteroids   ~193 cells total
+  unstable   x1   sizes: 1.75   cells: ~116   subtotal≈116
+  standard   x5   sizes: 1.55 0.88 1.00 0.95 0.82   cells: ~32 ~10 ~13 ~12 ~9   subtotal≈76
+  gravel     x1   sizes: 0.57   cells: ~1   subtotal≈1

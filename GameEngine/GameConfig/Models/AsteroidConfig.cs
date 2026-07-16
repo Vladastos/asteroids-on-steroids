@@ -36,6 +36,10 @@ public class ProceduralAsteroidConfig
     public float  NoiseFrequency    { get; set; } = 3f;
     /// <summary>Probability [0,1] of an inward dent per vertex.</summary>
     public float  ConcavityBias     { get; set; } = 0.05f;
+    /// <summary>Lloyd (centroidal-Voronoi) relaxation passes applied to the seeds before tessellation:
+    /// each pass nudges every seed to its cell's centroid, evening out cell sizes and removing slivers/
+    /// elongated cells. 0 = raw random (lumpy); 2-3 = natural and uniform; high = honeycomb-regular.</summary>
+    public int    RelaxIterations   { get; set; } = 2;
 
     // ── Material clusters ──────────────────────────────────────────────────────
     // Seeds are placed uniformly; heterogeneity comes from clusters — picked cells

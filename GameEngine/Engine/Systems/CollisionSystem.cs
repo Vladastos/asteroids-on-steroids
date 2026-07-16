@@ -46,9 +46,9 @@ public sealed class CollisionSystem : ISystem
     private const float RestitutionVelThreshold = 30f; // below this approach speed, no bounce
     private const float PenetrationSlop   = 0.5f;      // allowed overlap (px) before correcting
     private const float CorrectionPercent = 0.4f;      // fraction of penetration fixed per frame
-    private const float MaxCorrection     = 8f;        // cap on positional push per frame (px): deep
+    private const float MaxCorrection     = 16f;        // cap on positional push per frame (px): deep
                                                        // overlaps separate over several frames, never teleport
-    private const float DeepNoBounce      = 6f;        // overlap (px) past which we skip restitution — a body
+    private const float DeepNoBounce      = 100000f;        // overlap (px) past which we skip restitution — a body
                                                        // that appears already-embedded should ooze out, not bounce
 
     public CollisionSystem(ISpatialIndex spatial, EventBus bus)
@@ -216,6 +216,8 @@ public sealed class CollisionSystem : ISystem
             // Compound vs compound: collect from whichever has more cells — that body
             // is most likely the concave one whose cell-outward normals are authoritative.
             // For equal counts (fragment vs fragment) it doesn't matter which we use.
+            // CollectContacts always labels its own cells "PartA", so when B is the reference
+            // body the indices come back with the roles reversed and must be swapped back.
             if (ca.PartCount >= cb.PartCount)
             {
                 int start = outList.Count;
@@ -224,7 +226,9 @@ public sealed class CollisionSystem : ISystem
             }
             else
             {
+                int start = outList.Count;
                 cb.CollectContacts(pb, rb, sa, pa, ra, outList);       // B-cell → A
+                for (int i = start; i < outList.Count; i++) outList[i] = outList[i].SwappedParts();
             }
         }
         else if (sa is CompoundShape ca2)
@@ -235,7 +239,9 @@ public sealed class CollisionSystem : ISystem
         }
         else if (sb is CompoundShape cb2)
         {
+            int start = outList.Count;
             cb2.CollectContacts(pb, rb, sa, pa, ra, outList);          // B-cell → A
+            for (int i = start; i < outList.Count; i++) outList[i] = outList[i].SwappedParts();
         }
         else
         {
