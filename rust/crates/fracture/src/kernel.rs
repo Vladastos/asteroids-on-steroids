@@ -1,8 +1,8 @@
 //! The conservative crack-propagation kernel — port of `FractureKernel.cs`
 //! (`CrackFront` + `StepFront`). Pure: operates on plain arrays, no ECS.
 
-use crate::properties::FractureProperties;
 use crate::process::FractureTiming;
+use crate::properties::FractureProperties;
 use crate::tuning::{self, lerp};
 use crate::types::{Bond, Cell};
 use glam::Vec2;
@@ -175,7 +175,11 @@ pub fn step_front(
         if broken[bk] {
             continue;
         }
-        let j = if bonds[bk].a == i { bonds[bk].b } else { bonds[bk].a };
+        let j = if bonds[bk].a == i {
+            bonds[bk].b
+        } else {
+            bonds[bk].a
+        };
         if pulverized[j] {
             continue;
         }
@@ -186,7 +190,11 @@ pub fn step_front(
         }
         let align = d.dot(flow);
         let aa = align.abs();
-        let wc = lerp(1.0, align.max(0.0).powf(tuning::ALIGN_EXPONENT), directionality);
+        let wc = lerp(
+            1.0,
+            align.max(0.0).powf(tuning::ALIGN_EXPONENT),
+            directionality,
+        );
         let wd = lerp(aa, 1.0 - aa, tuning::BREAK_PERP);
         out.push((bk, j, wc, wd));
         w += wc + wd;

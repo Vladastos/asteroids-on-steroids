@@ -7,9 +7,9 @@ use crate::contract::{FractureInput, FragmentSpec};
 use crate::geom::compute_inertia;
 use crate::kernel::{step_front, CrackFront};
 use crate::process::{FractureProcess, LivePiece};
+use crate::properties::FractureState;
 use crate::rng::Rng;
 use crate::tuning;
-use crate::properties::FractureState;
 use crate::types::{Bond, Cell, FracturableBody};
 use glam::Vec2;
 use std::collections::HashMap;
@@ -21,7 +21,12 @@ use std::collections::HashMap;
 /// Snapshot the bond graph: per-bond spin multiplier (1+spinFactor from body ω)
 /// and per-cell bond adjacency. Port of `PrepareGraph`.
 pub fn prepare_graph(body: &FracturableBody, spin_omega: f32) -> (Vec<f32>, Vec<Vec<usize>>) {
-    let spin_mul = compute_spin_mul(&body.cells, &body.bonds, spin_omega, body.material.spin_pre_stress);
+    let spin_mul = compute_spin_mul(
+        &body.cells,
+        &body.bonds,
+        spin_omega,
+        body.material.spin_pre_stress,
+    );
     let adj = build_adjacency(body.cells.len(), &body.bonds);
     (spin_mul, adj)
 }
@@ -152,7 +157,8 @@ pub fn build_result(
     fling: bool,
 ) -> Vec<FragmentSpec> {
     let total_area: f32 = body.cells.iter().map(|c| c.area).sum();
-    let (comp, comp_count) = connected_components(body.cells.len(), &body.bonds, broken, pulverized);
+    let (comp, comp_count) =
+        connected_components(body.cells.len(), &body.bonds, broken, pulverized);
 
     let mut groups: Vec<Vec<usize>> = vec![Vec::new(); comp_count];
     for (i, &c) in comp.iter().enumerate() {
@@ -166,8 +172,9 @@ pub fn build_result(
         if group.is_empty() {
             continue;
         }
-        let (spec, _remap) =
-            build_component_spec(body, input, group, &comp, c as i32, broken, fling_e, total_area, rng, fling);
+        let (spec, _remap) = build_component_spec(
+            body, input, group, &comp, c as i32, broken, fling_e, total_area, rng, fling,
+        );
         result.push(spec);
     }
     result
@@ -281,7 +288,9 @@ fn build_component_spec(
             cells: new_cells,
             bonds: new_bonds,
             material: mat,
-            state: FractureState { rng_seed: rng.next_u32() },
+            state: FractureState {
+                rng_seed: rng.next_u32(),
+            },
             fragile: body.fragile,
         },
         world_centroid,
@@ -328,7 +337,10 @@ fn derived_motion(
         }
     }
     let (s, c) = input.body_rotation.sin_cos();
-    let off_world = Vec2::new(off_local.x * c - off_local.y * s, off_local.x * s + off_local.y * c);
+    let off_world = Vec2::new(
+        off_local.x * c - off_local.y * s,
+        off_local.x * s + off_local.y * c,
+    );
     let torque = off_world.x * linear.y - off_world.y * linear.x;
     let angular = input.body_angular
         + (torque / inertia.max(1e-3) * tuning::TUMBLE_SCALE)
@@ -421,7 +433,8 @@ pub fn split_live(
                 continue;
             }
             if f.frontier.iter().any(|&fc| comp[fc] == c as i32) {
-                if let Some(sub) = partition_front(f, &comp, c as i32, &remap, spec.body.cells.len())
+                if let Some(sub) =
+                    partition_front(f, &comp, c as i32, &remap, spec.body.cells.len())
                 {
                     sub_fronts.push(sub);
                 }
@@ -446,7 +459,10 @@ pub fn split_live(
         } else {
             None
         };
-        pieces.push(LivePiece { spec, process: sub_proc });
+        pieces.push(LivePiece {
+            spec,
+            process: sub_proc,
+        });
     }
     pieces
 }

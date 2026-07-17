@@ -51,7 +51,15 @@ fn grid(nx: usize, ny: usize, s: f32, strength: f32, cell_toughness: f32) -> Fra
     let idx = |gx: usize, gy: usize| gy * nx + gx;
     let mut bonds = Vec::new();
     let mut push = |a: usize, b: usize| {
-        bonds.push(Bond { a, b, edge_length: s, strength, strength_mult: 1.0, stress: 0.0, broken: false })
+        bonds.push(Bond {
+            a,
+            b,
+            edge_length: s,
+            strength,
+            strength_mult: 1.0,
+            stress: 0.0,
+            broken: false,
+        })
     };
     for gy in 0..ny {
         for gx in 0..nx {
@@ -65,7 +73,13 @@ fn grid(nx: usize, ny: usize, s: f32, strength: f32, cell_toughness: f32) -> Fra
     }
     let mut m = mat();
     m.cell_toughness = cell_toughness;
-    FracturableBody { cells, bonds, material: m, state: FractureState::default(), fragile: false }
+    FracturableBody {
+        cells,
+        bonds,
+        material: m,
+        state: FractureState::default(),
+        fragile: false,
+    }
 }
 
 fn input_for(body: &FracturableBody, impact: Vec2) -> FractureInput {
@@ -134,11 +148,22 @@ fn a_prebroken_body_splits_and_conserves_area_and_mass() {
     let pulverized = [false, false, false];
     let mut rng = Rng::new(1);
 
-    let frags = build_result(&body, &input, &broken, &pulverized, &[0.0; 3], &mut rng, true);
+    let frags = build_result(
+        &body,
+        &input,
+        &broken,
+        &pulverized,
+        &[0.0; 3],
+        &mut rng,
+        true,
+    );
     assert_eq!(frags.len(), 2, "one broken bond in a chain ⇒ two fragments");
 
     let frag_area: f32 = frags.iter().map(|f| f.area).sum();
-    assert!((frag_area - total_area(&body)).abs() < 1e-3, "area must be conserved");
+    assert!(
+        (frag_area - total_area(&body)).abs() < 1e-3,
+        "area must be conserved"
+    );
 
     // mass == area here, so the two-cell piece is twice the one-cell piece.
     let mut areas: Vec<f32> = frags.iter().map(|f| f.area).collect();
@@ -159,31 +184,55 @@ fn a_hard_hit_cascades_into_multiple_fragments() {
 
     let mut proc = seed_process(
         &body,
-        0,                        // struck the corner cell
-        Vec2::new(-15.0, -15.0),  // impact point (world == local here)
-        Vec2::ZERO,               // body position
-        0.0,                      // rotation
-        0.0,                      // angular
-        Vec2::new(1.0, 1.0),      // dir into the body
-        2000.0,                   // energy — plenty to shatter
-        &WeaponProfile { directionality: 0.0, blast_fraction: 0.0, knockback: 0.0 },
+        0,                       // struck the corner cell
+        Vec2::new(-15.0, -15.0), // impact point (world == local here)
+        Vec2::ZERO,              // body position
+        0.0,                     // rotation
+        0.0,                     // angular
+        Vec2::new(1.0, 1.0),     // dir into the body
+        2000.0,                  // energy — plenty to shatter
+        &WeaponProfile {
+            directionality: 0.0,
+            blast_fraction: 0.0,
+            knockback: 0.0,
+        },
         0.0,
     );
 
     let pulv = drive_to_completion(&mut body, &mut proc);
-    assert!(pulv.is_empty(), "cell_toughness is huge ⇒ nothing vaporises");
+    assert!(
+        pulv.is_empty(),
+        "cell_toughness is huge ⇒ nothing vaporises"
+    );
 
     let comps = count_components(n, &body.bonds, &proc.broken, &proc.pulverized);
-    assert!(comps > 1, "a hard hit on weak bonds must split the body (got {comps})");
-    assert!(proc.broken.iter().any(|&b| b), "some bonds must have broken");
+    assert!(
+        comps > 1,
+        "a hard hit on weak bonds must split the body (got {comps})"
+    );
+    assert!(
+        proc.broken.iter().any(|&b| b),
+        "some bonds must have broken"
+    );
 
     // Finalise and confirm exact area conservation (nothing pulverised).
     let input = input_for(&body_ref, Vec2::new(-15.0, -15.0));
     let mut rng = Rng::new(7);
-    let frags = build_result(&body, &input, &proc.broken, &proc.pulverized, &proc.fling_e, &mut rng, true);
+    let frags = build_result(
+        &body,
+        &input,
+        &proc.broken,
+        &proc.pulverized,
+        &proc.fling_e,
+        &mut rng,
+        true,
+    );
     assert_eq!(frags.len(), comps, "one fragment per surviving component");
     let frag_area: f32 = frags.iter().map(|f| f.area).sum();
-    assert!((frag_area - total_area(&body_ref)).abs() < 1e-2, "area conserved across the shatter");
+    assert!(
+        (frag_area - total_area(&body_ref)).abs() < 1e-2,
+        "area conserved across the shatter"
+    );
 }
 
 #[test]
@@ -199,7 +248,11 @@ fn full_blast_on_a_lone_cell_pulverises_it() {
         0.0,
         Vec2::X,
         5000.0,
-        &WeaponProfile { directionality: 0.0, blast_fraction: 1.0, knockback: 0.0 },
+        &WeaponProfile {
+            directionality: 0.0,
+            blast_fraction: 1.0,
+            knockback: 0.0,
+        },
         0.0,
     );
     let pulv = drive_to_completion(&mut body, &mut proc);
@@ -208,8 +261,19 @@ fn full_blast_on_a_lone_cell_pulverises_it() {
 
     let input = input_for(&body, Vec2::ZERO);
     let mut rng = Rng::new(1);
-    let frags = build_result(&body, &input, &proc.broken, &proc.pulverized, &proc.fling_e, &mut rng, true);
-    assert!(frags.is_empty(), "a fully vaporised body yields no fragment bodies");
+    let frags = build_result(
+        &body,
+        &input,
+        &proc.broken,
+        &proc.pulverized,
+        &proc.fling_e,
+        &mut rng,
+        true,
+    );
+    assert!(
+        frags.is_empty(),
+        "a fully vaporised body yields no fragment bodies"
+    );
 }
 
 #[test]
@@ -217,8 +281,20 @@ fn area_is_conserved_even_with_partial_pulverisation() {
     let body_ref = grid(3, 3, 10.0, 1.0, 0.5); // some cells will vaporise
     let mut body = body_ref.clone();
     let mut proc = seed_process(
-        &body, 4, Vec2::ZERO, Vec2::ZERO, 0.0, 0.0, Vec2::X, 3000.0,
-        &WeaponProfile { directionality: 0.0, blast_fraction: 0.6, knockback: 0.0 }, 0.0,
+        &body,
+        4,
+        Vec2::ZERO,
+        Vec2::ZERO,
+        0.0,
+        0.0,
+        Vec2::X,
+        3000.0,
+        &WeaponProfile {
+            directionality: 0.0,
+            blast_fraction: 0.6,
+            knockback: 0.0,
+        },
+        0.0,
     );
     drive_to_completion(&mut body, &mut proc);
 
@@ -229,7 +305,15 @@ fn area_is_conserved_even_with_partial_pulverisation() {
 
     let input = input_for(&body_ref, Vec2::ZERO);
     let mut rng = Rng::new(3);
-    let frags = build_result(&body, &input, &proc.broken, &proc.pulverized, &proc.fling_e, &mut rng, true);
+    let frags = build_result(
+        &body,
+        &input,
+        &proc.broken,
+        &proc.pulverized,
+        &proc.fling_e,
+        &mut rng,
+        true,
+    );
     let frag_area: f32 = frags.iter().map(|f| f.area).sum();
 
     assert!(
@@ -244,20 +328,43 @@ fn the_same_seed_produces_identical_fractures() {
     let run = || {
         let mut body = grid(4, 4, 10.0, 1.0, 2.0);
         let mut proc = seed_process(
-            &body, 0, Vec2::new(-15.0, -15.0), Vec2::ZERO, 0.0, 0.0, Vec2::new(1.0, 1.0), 2500.0,
-            &WeaponProfile { directionality: 0.3, blast_fraction: 0.4, knockback: 0.0 }, 400.0,
+            &body,
+            0,
+            Vec2::new(-15.0, -15.0),
+            Vec2::ZERO,
+            0.0,
+            0.0,
+            Vec2::new(1.0, 1.0),
+            2500.0,
+            &WeaponProfile {
+                directionality: 0.3,
+                blast_fraction: 0.4,
+                knockback: 0.0,
+            },
+            400.0,
         );
         drive_to_completion(&mut body, &mut proc);
         let input = input_for(&grid(4, 4, 10.0, 1.0, 2.0), Vec2::new(-15.0, -15.0));
         let mut rng = Rng::new(42);
-        build_result(&body, &input, &proc.broken, &proc.pulverized, &proc.fling_e, &mut rng, true)
+        build_result(
+            &body,
+            &input,
+            &proc.broken,
+            &proc.pulverized,
+            &proc.fling_e,
+            &mut rng,
+            true,
+        )
     };
     let a = run();
     let b = run();
     assert_eq!(a.len(), b.len(), "fragment count must be reproducible");
     for (fa, fb) in a.iter().zip(&b) {
         assert!((fa.area - fb.area).abs() < 1e-4);
-        assert!((fa.linear - fb.linear).length() < 1e-3, "derived motion must be reproducible");
+        assert!(
+            (fa.linear - fb.linear).length() < 1e-3,
+            "derived motion must be reproducible"
+        );
         assert!((fa.angular - fb.angular).abs() < 1e-4);
     }
 }

@@ -29,6 +29,7 @@ mod service;
 mod simulator;
 pub mod tuning;
 mod types;
+mod voronoi;
 
 pub mod prelude {
     pub use crate::*;
@@ -48,3 +49,6 @@ pub use simulator::{
     prepare_graph, split_live,
 };
 pub use types::{Bond, Cell, FracturableBody, Rgba};
+pub use voronoi::{
+    build, build_asteroid, build_from_explicit_seeds, build_with_seeds, generate_convex,
+};

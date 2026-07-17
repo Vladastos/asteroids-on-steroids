@@ -16,7 +16,7 @@ Guiding principles:
 - **Verify each phase.** No phase is "done" without the stated check passing.
 
 Progress legend: `[ ]` todo · `[~]` in progress · `[x]` done.
-Workspace skeleton (Phase 1 partial) already exists under `rust/`.
+Phase 1 (all of it — fracture, collision, game-core) is complete under `rust/`.
 
 ---
 
@@ -42,10 +42,11 @@ Workspace skeleton (Phase 1 partial) already exists under `rust/`.
 
 ---
 
-## Phase 1 — Pure core crates `[~]`
+## Phase 1 — Pure core crates `[x]`
 
 No Bevy. Just `glam`, `serde`, unit tests. This is ~40% of the LOC but the
-lowest-risk 40%.
+lowest-risk 40%. **Complete: 36 tests green across `fracture` (19), `collision`
+(13), and `game-core` (4) — `cargo test --workspace --exclude game`.**
 
 ### 1a. Math & primitives `[x]`
 - `glam` replaces `System.Numerics`: `Vector2→Vec2`, `Matrix3x2→Mat3/Affine2`.
@@ -53,7 +54,7 @@ lowest-risk 40%.
   small shared module (candidate for a `geo`/`math` module in `game-core` or a tiny
   `geom` crate). These are used by both `fracture` and `collision`.
 
-### 1b. `fracture` crate `[~]`  ← skeleton committed
+### 1b. `fracture` crate `[x]`
 Port order (each fn has its C# origin named in the stub):
 1. `[x]` Types: `Cell`, `Bond`, `FracturableBody`, `FractureProperties`,
    `FractureInput`/`FragmentSpec`/`FractureResult`, `CrackFront`, `FractureProcess`.
@@ -72,46 +73,68 @@ Port order (each fn has its C# origin named in the stub):
    aspirational. Real fracture is `BeginFracture` (multi-frame). The ECS half of
    `FractureService`/`FractureCrackSystem` (knockback, per-front frame pacing,
    dust events) lives in the `game` crate's Bevy system, not here.
-8. `[ ]` `VoronoiTessellator.cs` → `voronoi.rs` (body construction from seeds;
-   needed to *build* bodies but not on the fracture hot path).  ← only remaining piece
+8. `[x]` `VoronoiTessellator.cs` → `voronoi.rs`: `generate_convex` (Valtr's
+   algorithm, own deterministic RNG), `build`/`build_with_seeds` (Lloyd relax,
+   largest-component keep, enclosed-hole fill)/`build_from_explicit_seeds`.
+   `BuildShape` (the `CompoundShape` collider) is deliberately **not** ported
+   here — zipping `cell.local` into `collision::Polygon` is a one-line glue
+   concern; porting it would add a `fracture → collision` dependency for no
+   algorithmic benefit.
 
-**Status:** the pure fracture core is ported and green (11 tests: `cargo test -p
-fracture`) — energy model, inertia, exact area conservation across splits,
-cascading shatter, pulverisation, and determinism all locked down. Only the
-tessellator (body construction) remains for full parity.
+**Status:** the fracture core — energy model, inertia, exact area conservation
+across splits, cascading shatter, pulverisation, determinism, AND the Voronoi
+tessellator (convexity, area coverage, connectivity, membership-carved
+concavities, hole-filling, non-convex authored outlines) — is fully ported and
+green. 19 tests: `cargo test -p fracture`.
 
-**Testing (the payoff of a Bevy-free crate):**
-- Deterministic golden tests: feed a fixed body + impact, assert fragment count,
-  total area conservation (Σ fragment area ≈ original − vaporized), and momentum
-  bookkeeping. Extend `tests/connectivity.rs`.
-- Cross-check a handful against the C# output by dumping the same inputs from the
-  C# `AsteroidDemo` and comparing fragment counts/areas within a float epsilon.
+**Testing (the payoff of a Bevy-free crate):** deterministic golden tests —
+fragment count, exact area conservation (Σ fragment area ≈ original −
+vaporized), moment of inertia against the closed form, reproducibility from a
+fixed seed, and tessellation invariants (convexity, connectivity, hole-filling)
+— all runnable with zero engine/renderer setup.
 
-**Deliverable:** `cargo test -p fracture` green; `try_fracture` returns real fragments.
-**Verify:** golden tests pass; area/momentum conserved within epsilon.
+**Deliverable:** `cargo test -p fracture` green (19/19); `build`/`build_with_seeds`
+produce real tessellated bodies.
+**Verify:** golden + tessellation tests pass.
 
-### 1c. `collision` crate `[ ]`
-- Shape hierarchy `CollisionShape → Circle/AABB/Polygon/Compound`: in Rust prefer an
-  `enum Shape { Circle(..), Aabb(..), Polygon(..), Compound(..) }` over trait objects
-  (cache-friendlier, no `dyn`). Port `ContactInfo`, `RayCastResult`.
-- `SpatialGrid` (`ISpatialIndex`) → `SpatialGrid` struct. Straight port; index-based.
-- Narrow-phase (SAT for convex polys) from `CollisionSystem.cs`'s detection half.
-  **Leave impulse resolution out of this crate** — it reads `RigidBody`/`Velocity`,
-  so it belongs in a `game` system (Phase 5).
+### 1c. `collision` crate `[x]`
+- Shape hierarchy ported as `enum Shape { Circle, Aabb, Polygon(Polygon),
+  Compound(Compound) }` (cache-friendlier than the C#'s `abstract class` +
+  double-dispatch, no `dyn`) with a flattened `match`-based `intersects()`
+  replacing the double-dispatch table. `ContactInfo`, `RayCastResult` ported
+  directly.
+- `SpatialGrid` ported generic over an opaque handle `H: Copy + Eq` (so the
+  crate doesn't need Bevy's `Entity`); the `game` crate instantiates
+  `SpatialGrid<Entity>`.
+- Narrow phase: circle/circle, circle/polygon (SAT), polygon/polygon (SAT),
+  circle/AABB (closest-point), AABB/AABB, plus recursive `Compound` fan-out on
+  either side with per-part AABB culling and `collect_contacts` (the full
+  contact manifold, not just the deepest hit — needed to seed fracture on the
+  cell actually struck). Raycast: circle, polygon (Cyrus-Beck), compound
+  (nearest part) — AABB has none, matching the C#.
+  **Impulse resolution stays out of this crate** — it reads
+  `RigidBody`/`Velocity` and belongs in a `game` system (Phase 5).
 
-**Deliverable:** `cargo test -p collision` with overlap/raycast unit tests.
-**Verify:** known overlapping/non-overlapping shape pairs classify correctly.
+**Deliverable:** `cargo test -p collision` green (13/13).
+**Verify:** every shape pair separates cleanly along its reported normal
+(property-tested: moving A by `normal * depth` always ends the contact);
+compound tests confirm the correct cell is reported struck and that disabled
+(pulverized) parts are invisible to every test.
 
-### 1d. `game-core` config models `[ ]`
-- Port `GameConfig/Models/*.cs` to `serde` structs (`#[derive(Deserialize)]`,
-  `#[serde(rename_all = "camelCase")]`). Comments + trailing commas → parse with
-  `json5`.
-- Replace `GameConfigLoader.FindAssetsDir` (filesystem walk): native = read from a
-  known path; wasm = `include_str!`/`include_bytes!` or fetch via Bevy assets
-  (decided in Phase 6). Abstract behind one `load_config()` fn now.
+### 1d. `game-core` config models `[x]`
+- Ported `GameConfig/Models/*.cs` to `serde` structs (`#[derive(Deserialize)]`,
+  `#[serde(rename_all = "camelCase", default)]` mirroring every C# `= value`
+  default field-for-field). Comments + trailing commas parse via `json5`.
+- `load()` reads from a directory (native); `load_config_from_str`/
+  `load_shape_from_str` are the seam Phase 6 swaps to `include_str!`/
+  `AssetServer` for wasm — parsing logic is unchanged either way.
+  `find_assets_dir` ports `GameConfigLoader.FindAssetsDir`'s walk-up.
 
-**Deliverable:** `game_config.json` + all shapes deserialize into typed structs.
-**Verify:** a test loads the real `Assets/*.json` and asserts a few known values.
+**Deliverable:** `cargo test -p game-core` green (4/4) — including loading the
+REAL `GameEngine/Assets/game_config.json` + every file in `Assets/shapes/`
+and asserting known values (rock toughness, bruiser shape data, etc.).
+**Verify:** production JSON assets parse unchanged; sparse/comment-bearing
+JSON falls back to defaults instead of erroring.
 
 ---
 
@@ -286,7 +309,7 @@ tessellator (body construction) remains for full parity.
 | wasm binary too large / slow load | Phase 6, 7 | wasm-opt, feature trimming, brotli, splash |
 | Asset loading differs native vs. wasm | Phase 1d, 6 | One `load_config()` abstraction chosen early |
 
-## Suggested order of first three PRs
-1. **Phase 1b complete** — `fracture` fully ported + golden tests (highest-risk core, provable in isolation).
+## Suggested order of next PRs
+1. ~~Phase 1 (fracture + collision + game-core), fully ported and tested~~ — **done**.
 2. **Phases 2–3** — Bevy app, states, components, movement (skeleton comes alive).
 3. **Phase 4 minimal + Phase 5 fracture glue** — one asteroid you can shoot and shatter on screen (the vertical slice).

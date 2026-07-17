@@ -28,7 +28,11 @@ pub struct WeaponProfile {
 
 impl Default for WeaponProfile {
     fn default() -> Self {
-        Self { directionality: 0.4, blast_fraction: 0.3, knockback: 0.01 }
+        Self {
+            directionality: 0.4,
+            blast_fraction: 0.3,
+            knockback: 0.01,
+        }
     }
 }
 
@@ -54,12 +58,19 @@ pub fn compute_energy(
 ) -> f32 {
     let r = impact_point - body_pos;
     let rxn = r.x * dir.y - r.y * dir.x; // (r × n) z
-    let mut inv_mass = (if impactor_mass > 0.0 { 1.0 / impactor_mass } else { 0.0 })
-        + (if m_body > 0.0 { 1.0 / m_body } else { 0.0 });
+    let mut inv_mass = (if impactor_mass > 0.0 {
+        1.0 / impactor_mass
+    } else {
+        0.0
+    }) + (if m_body > 0.0 { 1.0 / m_body } else { 0.0 });
     if i_body > 1e-6 {
         inv_mass += rxn * rxn / i_body;
     }
-    let m_eff = if inv_mass > 1e-9 { 1.0 / inv_mass } else { m_body };
+    let m_eff = if inv_mass > 1e-9 {
+        1.0 / inv_mass
+    } else {
+        m_body
+    };
     let e = restitution.clamp(0.0, 0.95);
     tuning::ENERGY_SCALE * 0.5 * m_eff * normal_speed * normal_speed * (1.0 - e * e)
 }

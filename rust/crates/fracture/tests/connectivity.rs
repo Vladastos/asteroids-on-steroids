@@ -4,7 +4,11 @@
 use fracture::{connected_components, count_components, Bond};
 
 fn bond(a: usize, b: usize) -> Bond {
-    Bond { a, b, ..Default::default() }
+    Bond {
+        a,
+        b,
+        ..Default::default()
+    }
 }
 
 #[test]

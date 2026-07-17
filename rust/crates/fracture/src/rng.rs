@@ -10,7 +10,9 @@ pub struct Rng {
 
 impl Rng {
     pub fn new(seed: u64) -> Self {
-        Self { state: if seed == 0 { 0x9E3779B97F4A7C15 } else { seed } }
+        Self {
+            state: if seed == 0 { 0x9E3779B97F4A7C15 } else { seed },
+        }
     }
 
     #[inline]
@@ -32,5 +34,21 @@ impl Rng {
     #[inline]
     pub fn next_f32(&mut self) -> f32 {
         (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
+    }
+
+    /// Uniform integer in `[0, n)`. Port of `System.Random.Next(n)`'s contract
+    /// (not its bit stream — see the module doc).
+    #[inline]
+    pub fn next_range(&mut self, n: usize) -> usize {
+        if n == 0 {
+            return 0;
+        }
+        ((self.next_u32() as u64 * n as u64) >> 32) as usize
+    }
+
+    /// True/false with even odds. Port of `rng.Next(2) == 0`.
+    #[inline]
+    pub fn next_bool(&mut self) -> bool {
+        self.next_u32() & 1 == 0
     }
 }

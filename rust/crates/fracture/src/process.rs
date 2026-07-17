@@ -16,14 +16,20 @@ impl FractureTiming {
     pub const DEFAULT_FIXED_DT: f32 = 1.0 / 120.0;
 
     pub fn default_timing() -> Self {
-        Self { steps_per_iteration: 2, frames_per_iteration: 1 }
+        Self {
+            steps_per_iteration: 2,
+            frames_per_iteration: 1,
+        }
     }
 
     /// Map a material `crack_speed` (cells/sec) to integer pacing at `fixed_dt`.
     pub fn from_crack_speed(crack_speed: f32, fixed_dt: f32) -> Self {
         let pops_per_step = crack_speed.max(0.0001) * fixed_dt.max(1e-4);
         if pops_per_step >= 1.0 {
-            Self { steps_per_iteration: pops_per_step.round() as i32, frames_per_iteration: 1 }
+            Self {
+                steps_per_iteration: pops_per_step.round() as i32,
+                frames_per_iteration: 1,
+            }
         } else {
             Self {
                 steps_per_iteration: 1,
