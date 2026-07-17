@@ -9,10 +9,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../AsteroidsEngine.csproj" />
+    <!-- Shared game logic (states + GameHost loop) lives in AsteroidsGameCore; this exe only adds
+         the SDL/Skia backend and a thin Program.cs that constructs the window. -->
+    <ProjectReference Include="../GameCore/AsteroidsGameCore.csproj" />
     <ProjectReference Include="../Platform/Sdl/Engine.Platform.Sdl.csproj" />
-    <ProjectReference Include="../GameConfig/GameConfig.csproj" />
-    <ProjectReference Include="../Gameplay/AsteroidsGameplay.csproj" />
   </ItemGroup>
 
   <ItemGroup>

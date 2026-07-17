@@ -42,15 +42,14 @@ GameEngine/
     Input/                      # InputSystem, KeyCode
     Rendering/                  # IRenderer, IGameWindow interfaces, Camera, Color, FontSpec
     State/                      # IGameState, StateStack (engine-layer versions — see note below)
-  Platform/Sdl/                 # SDL2 + SkiaSharp backend implementing IGameWindow / IRenderer
+  Platform/Sdl/                 # SDL2 + SkiaSharp backend (net8.0) implementing IGameWindow / IRenderer
+  Platform/WinForms/            # WinForms + GDI+ backend (net8.0-windows) — Windows-only sibling
   GameConfig/                   # GameConfigLoader, GameConfig model, ShapeData
-  Game/                         # Executable (AsteroidsGame.csproj)
-    Program.cs                  # Entry point & main loop
-    GameContext.cs              # Shared services (config, shapes, input, RNG, score, cell budget)
-    States/                     # MainMenuState, PlayingState, WaveCompleteState, GameOverState
-    Components/GameComponents.cs # Game-specific components (TimeToLive, BodyColor, SkillState, …)
+  GameCore/                     # Shared game library (net8.0, no platform): States/ + GameHost (loop)
+  Game/                         # SDL executable (AsteroidsGame.csproj) — thin Program.cs → GameHost.Run
+  Game.WinForms/                # WinForms executable (net8.0-windows) — thin Program.cs → GameHost.Run
   Assets/                       # game_config.json + shapes/*.json
-  Demos/AsteroidDemo/           # Standalone demo & shape editor (large Program.cs)
+  Demos/AsteroidDemo/           # Standalone demo & shape editor (SDL-only, large Program.cs)
 ```
 
 ## Architecture
@@ -117,9 +116,10 @@ Each `PlayingState` owns its own `World` and system list; tearing down a state d
 The engine has zero dependency on any UI toolkit. Platform-specific code is isolated in:
 
 - `IRenderer` (`Engine/Rendering/IRenderer.cs`) — immediate-mode 2D draw API (lines, convex polygons, circles, text, transform stack).
-- `IGameWindow` — window lifecycle + event callbacks.
-- **Active backend**: `Platform/Sdl/SdlGameWindow.cs` + `SkiaRenderer.cs` (SDL2 via `Silk.NET.SDL`, 2D rendering via `SkiaSharp`).
-- A dormant WinForms/GDI+ backend (`Engine/Rendering/GameWindow.cs`) is excluded from the engine build (compile-only under the `WINDOWS` symbol).
+- `IPostEffects` (`Engine/Rendering/IPostEffects.cs`) — **optional** screen-space warp (`Distort`), feature-detected via `renderer as IPostEffects`; backends may skip it.
+- `IGameWindow` — window lifecycle + event callbacks (`Width/Height/ShouldClose`, `Renderer`, 5 input events, `PollEvents`/`Present`).
+- **Two backends** (separate assemblies, each implementing the PAL): `Platform/Sdl` (SDL2 + SkiaSharp GPU, net8.0, cross-platform — the Linux/dev build) and `Platform/WinForms` (WinForms + GDI+, **net8.0-windows, Windows-only**; its `Distort` is an approximate CPU affine warp). `KeyCode`/`MouseButton` values equal `System.Windows.Forms.Keys`/`MouseButtons` so the WinForms backend maps keys by a direct cast.
+- **Backend selection**: no factory/`#if` — each executable (`Game/`=SDL, `Game.WinForms/`=WinForms) is a thin `Program.cs` that constructs its own concrete window and calls the shared `GameHost.Run(IGameWindow)` in `GameCore/`. The WinForms projects **cannot build on Linux** (need the Windows Desktop SDK); never name their `.csproj` in a Linux build.
 
 ### Destruction engine (`Engine/Destruction/`)
 

@@ -1,85 +1,19 @@
-// Asteroids on Steroids
+// Asteroids on Steroids — SDL2 + SkiaSharp entry point.
 //
 //   WASD        thrust
 //   Mouse       aim
 //   Left-click  fire
-//   Q/E/R       skills (dash / turbo / slow-mo)  [stub]
+//   Q/E/R       skills (dash / turbo / slow-mo)
 //   Esc         quit
 //
 //   cd GameEngine/Game && dotnet run
+//
+// Backend-agnostic bootstrap + loop live in GameHost (AsteroidsGameCore); this file only
+// constructs the concrete SDL window. The WinForms exe is the mirror of this file.
 
-using System.Diagnostics;
-using AsteroidsEngine.Engine.Core;
-using AsteroidsEngine.Engine.Input;
-using AsteroidsEngine.Platform.Sdl;
 using AsteroidsGame;
-using AsteroidsGame.States;
-using AsteroidsGame.Config;
-
-// ── Config ────────────────────────────────────────────────────────────────────
-
-string assetsDir = GameConfigLoader.FindAssetsDir(AppContext.BaseDirectory);
-var (config, shapes) = GameConfigLoader.Load(assetsDir);
-
-// ── Window + input ────────────────────────────────────────────────────────────
+using AsteroidsEngine.Platform.Sdl;
 
 var (W, H) = SdlGameWindow.QueryDisplaySize();
 using var window = new SdlGameWindow("Asteroids on Steroids", W, H, fullscreen: true);
-var input = new InputSystem();
-window.KeyDown += k => input.OnKeyDown(k);
-window.KeyUp += k => input.OnKeyUp(k);
-window.MouseMoved += p => input.OnMouseMove(p);
-window.MouseButtonChanged += (b, pr) => input.OnMouseButton(b, pr);
-window.TextInput += s => input.OnTextInput(s);
-
-// ── State machine setup ───────────────────────────────────────────────────────
-
-var ctx = new GameContext(config, shapes, input, W, H);
-IGameState state = new MainMenuState(ctx);
-state.Enter();
-
-// ── Timing ────────────────────────────────────────────────────────────────────
-
-const double FixedDt = 1.0 / 120.0;
-var fixedStep = new FixedTimestep(FixedDt);
-var sw = Stopwatch.StartNew();
-long lastTicks = sw.ElapsedTicks;
-
-// ── Main loop ─────────────────────────────────────────────────────────────────
-
-while (!window.ShouldClose)
-{
-    window.PollEvents();
-
-    long now = sw.ElapsedTicks;
-    double frameTime = (double)(now - lastTicks) / Stopwatch.Frequency;
-    lastTicks = now;
-
-    input.BeginFrame();
-
-    // Fixed-step updates. Esc is handled by the states (menu quits, PlayingState pauses); a state
-    // sets ctx.QuitRequested to exit.
-    int steps = fixedStep.Advance(frameTime);
-    for (int i = 0; i < steps; i++)
-    {
-        IGameState? next = state.Update(FixedDt);
-        if (next is not null)
-        {
-            state.Exit();
-            state = next;
-            state.Enter();
-        }
-    }
-    if (ctx.QuitRequested) break;
-
-    // Render at the sub-step alpha position.
-    state.Draw(window.Renderer, fixedStep.Alpha);
-    window.Present();
-
-    // Soft frame cap: sleep until the next 120 Hz slot if we finished early.
-    double elapsed = (double)(sw.ElapsedTicks - now) / Stopwatch.Frequency;
-    int sleepMs = (int)((1.0 / 120.0 - elapsed) * 1000);
-    if (sleepMs > 1) Thread.Sleep(sleepMs);
-}
-
-state.Exit();
+GameHost.Run(window);

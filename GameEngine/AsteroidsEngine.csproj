@@ -20,14 +20,16 @@
     <Compile Remove="Platform/**" />
     <!-- GameConfig is its own project (shared by demo and game). -->
     <Compile Remove="GameConfig/**" />
-    <!-- Game project files (future AsteroidsGame.csproj). -->
+    <!-- Game project files (SDL exe). -->
     <Compile Remove="Game/**" />
+    <!-- WinForms exe (net8.0-windows), its own project. -->
+    <Compile Remove="Game.WinForms/**" />
+    <!-- Shared game library (states + GameHost), its own project. -->
+    <Compile Remove="GameCore/**" />
     <!-- Shared gameplay library (systems/components/events), its own project. -->
     <Compile Remove="Gameplay/**" />
     <!-- Assets are data files, not source. -->
     <Compile Remove="Assets/**" />
-    <!-- Dormant future WinForms backend; compiled only under the WINDOWS symbol. -->
-    <Compile Remove="Engine/Rendering/GameWindow.cs" />
   </ItemGroup>
 
 </Project>
