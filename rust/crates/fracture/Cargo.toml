@@ -1,0 +1,16 @@
+[package]
+name = "fracture"
+version = "0.1.0"
+edition = "2021"
+
+# PURE crate — the port of GameEngine/Engine/Destruction/*.
+# It must NEVER depend on bevy, a renderer, or the ECS. It operates on plain
+# data and returns plain data (FractureResult / Vec<FragmentSpec>); the caller
+# (a thin Bevy system in the `game` crate) reads components and spawns entities.
+# This mirrors the C# rule: "the engine spawns no entities during fracture."
+
+[dependencies]
+glam.workspace = true
+
+[dev-dependencies]
+approx.workspace = true

@@ -1,0 +1,37 @@
+# Workspace root for the Rust / Bevy port.
+#
+# Layout mirrors the C# decoupling: `fracture` and `collision` are PURE crates
+# (glam only, no Bevy) so they stay unit-testable and insulated from Bevy's
+# per-release API churn. `game-core` holds components + config models. `game`
+# is the only crate that depends on Bevy and wires everything together.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/fracture",
+    "crates/collision",
+    "crates/game-core",
+    "game",
+]
+
+# Shared dependency versions live here; crates opt in with `x.workspace = true`.
+[workspace.dependencies]
+glam       = "0.29"          # Vec2/Mat3 — same version family Bevy re-exports
+serde      = { version = "1", features = ["derive"] }
+json5      = "0.4"           # config JSON with comments + trailing commas
+approx     = "0.5"           # float asserts in tests
+
+# Pin Bevy EXACTLY and upgrade deliberately — it breaks APIs every release.
+bevy               = { version = "=0.16.0", default-features = false }
+bevy_vector_shapes = "=0.10.0"   # immediate-mode 2D vector draw (match to Bevy ver)
+
+# Release profile tuned for small wasm binaries.
+[profile.release]
+opt-level = "z"
+lto       = true
+codegen-units = 1
+panic     = "abort"
+
+# Keep the fracture/collision crates fast to iterate on even in dev.
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,0 +1,24 @@
+[package]
+name = "game"
+version = "0.1.0"
+edition = "2021"
+
+# The ONLY crate that depends on Bevy. Everything game-logic-shaped lives in the
+# pure crates; this crate is just the glue: components ↔ pure data, systems,
+# states, rendering, and the wasm entry point.
+
+[dependencies]
+bevy = { workspace = true, features = [
+    "bevy_winit",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_sprite",   # Mesh2d path for lyon-tessellated fills
+    "bevy_text",
+    "bevy_ui",
+    "webgl2",        # browser target
+    "x11",           # native dev (drop for pure-wasm builds)
+] }
+bevy_vector_shapes.workspace = true
+fracture   = { path = "../crates/fracture" }
+# collision = { path = "../crates/collision" }
+# game-core = { path = "../crates/game-core" }
