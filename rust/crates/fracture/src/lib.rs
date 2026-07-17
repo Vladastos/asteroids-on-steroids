@@ -6,28 +6,45 @@
 //! spreads it across the bond graph, breaking bonds and pulverising cells;
 //! connected-component analysis over the surviving bonds yields the fragments.
 //!
-//! Two entry points mirror the C# `FractureService`:
-//!   * [`try_fracture`]  — atomic, one-frame (was `FractureService.TryFracture`)
-//!   * [`begin_fracture`] — seeds a [`FractureProcess`] the caller advances over
-//!     several frames (was `FractureService.BeginFracture` + `FractureCrackSystem`)
+//! Pipeline (all pure — no Bevy, no renderer):
+//!   1. [`compute_energy`] — reduced-mass impact energy (was `ComputeEnergy`).
+//!   2. [`seed_process`] — build a [`FractureProcess`] seeded with one [`CrackFront`]
+//!      (the non-ECS core of `FractureService.Seed`).
+//!   3. [`step_front`] / [`drive_to_completion`] — advance the crack field
+//!      (`FractureKernel.StepFront`).
+//!   4. [`split_live`] / [`build_result`] — extract fragment bodies with derived
+//!      motion (`FractureSimulator`).
 //!
-//! Nothing here touches Bevy or a renderer. `Rgba`/`role` on a cell are carried
-//! through splits but ignored by the physics (see [`types::Cell`]).
+//! The Bevy `game` crate supplies the ECS glue (reads components, stores the
+//! process, spawns fragments via `Commands`, applies knockback) — mirroring the
+//! C# rule that the engine spawns no entities.
 
 mod contract;
+mod geom;
 mod kernel;
 mod process;
 mod properties;
+mod rng;
 mod service;
 mod simulator;
+pub mod tuning;
 mod types;
 
+pub mod prelude {
+    pub use crate::*;
+}
+
 pub use contract::{FractureInput, FractureResult, FragmentSpec};
-pub use kernel::CrackFront;
+pub use geom::{compute_inertia, contains_point, distance_to_polygon, nearest_cell};
+pub use kernel::{step_front, CrackFront};
 pub use process::{FractureProcess, FractureTiming, LivePiece};
 pub use properties::{FractureProperties, FractureState};
-pub use service::{begin_fracture, try_fracture, WeaponProfile};
+pub use rng::Rng;
+pub use service::{
+    compute_energy, effective_directionality, fragile_vaporize_energy, seed_process, WeaponProfile,
+};
 pub use simulator::{
-    build_result, connected_components, count_components, prepare_graph, split_live,
+    build_result, compute_spin_mul, connected_components, count_components, drive_to_completion,
+    prepare_graph, split_live,
 };
 pub use types::{Bond, Cell, FracturableBody, Rgba};

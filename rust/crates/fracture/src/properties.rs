@@ -35,10 +35,12 @@ pub struct FractureProperties {
     pub detach_cell_jitter: f32,
 }
 
-/// Accumulated sub-threshold fracture state on a body (port of `FractureState.cs`).
-/// Fill in fields as you port; kept separate from the immutable material.
+/// Mutable per-entity fracture runtime state (port of `FractureState.cs`). Kept
+/// separate from the immutable material so presets stay shareable. Accumulated
+/// damage lives on `Bond::stress` / `Cell::damage`, not here.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FractureState {
-    // TODO: port fields from Engine/Components/FractureState.cs
-    pub accumulated_damage: f32,
+    /// Deterministic per-body RNG seed (tessellation, scatter spin). Fixed timestep
+    /// + seeded RNG ⇒ reproducible fractures.
+    pub rng_seed: u32,
 }

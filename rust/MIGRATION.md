@@ -59,15 +59,26 @@ Port order (each fn has its C# origin named in the stub):
    `FractureInput`/`FragmentSpec`/`FractureResult`, `CrackFront`, `FractureProcess`.
 2. `[x]` Graph: `build_adjacency`, `connected_components`, `count_components`,
    `FractureTiming::from_crack_speed`.
-3. `[ ]` `service::impact_energy` (reduced-mass KE → fracture units).  ← do next
-4. `[ ]` `simulator::compute_spin_mul`, `build_result` (+ `BuildComponentSpec`,
-   `DerivedMotion`, `InertiaAbout`).
-5. `[ ]` `kernel::CrackFront::{seed,step}` — the frontier energy-split loop
+3. `[x]` `service::compute_energy` (reduced-mass KE → fracture units) +
+   `effective_directionality` + `fragile_vaporize_energy`.
+4. `[x]` `simulator::compute_spin_mul`, `build_result` (+ `build_component_spec`,
+   `derived_motion`, `inertia_about`); `geom::compute_inertia`.
+5. `[x]` `kernel::{CrackFront::seed, step_front}` — the frontier energy-split loop
    (`FractureKernel.cs`).
-6. `[ ]` `service::try_fracture` (atomic path) — wire 3→4→5 together.
-7. `[ ]` `simulator::split_live` + `service::begin_fracture` (multi-frame path).
+6. `[x]` `service::seed_process` (fresh-process branch of `FractureService.Seed`,
+   sans ECS) + `simulator::drive_to_completion` driver.
+7. `[x]` `simulator::split_live` + `partition_front` (multi-frame split).
+   NB: the C# has no atomic `TryFracture` — the CLAUDE.md "atomic path" was
+   aspirational. Real fracture is `BeginFracture` (multi-frame). The ECS half of
+   `FractureService`/`FractureCrackSystem` (knockback, per-front frame pacing,
+   dust events) lives in the `game` crate's Bevy system, not here.
 8. `[ ]` `VoronoiTessellator.cs` → `voronoi.rs` (body construction from seeds;
-   needed to build bodies, but not on the fracture hot path — can trail 6).
+   needed to *build* bodies but not on the fracture hot path).  ← only remaining piece
+
+**Status:** the pure fracture core is ported and green (11 tests: `cargo test -p
+fracture`) — energy model, inertia, exact area conservation across splits,
+cascading shatter, pulverisation, and determinism all locked down. Only the
+tessellator (body construction) remains for full parity.
 
 **Testing (the payoff of a Bevy-free crate):**
 - Deterministic golden tests: feed a fixed body + impact, assert fragment count,
