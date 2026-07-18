@@ -4,7 +4,7 @@
 
 use std::time::Instant;
 
-use bevy::{log::info, prelude::*};
+use bevy::{log::info, prelude::*, window::PrimaryWindow};
 use fracture::{
     build_result, compute_energy, count_components, drive_to_completion, seed_process,
     FracturableBody as PureBody, FractureInput, FractureProcess as PureProcess, Rng, WeaponProfile,
@@ -24,6 +24,8 @@ fn main() {
         .init_state::<AppState>()
         .insert_resource(Time::<Fixed>::from_seconds(1.0 / 120.0))
         .insert_resource(FixedTickProbe::default())
+        .init_resource::<PlayerInput>()
+        .init_resource::<PlayerInputLogProbe>()
         .add_event::<ImpactEvent>()
         .add_systems(Startup, log_startup)
         .add_systems(OnEnter(AppState::MainMenu), enter_main_menu)
@@ -40,9 +42,14 @@ fn main() {
         .add_systems(
             Update,
             (
-                main_menu_input.run_if(in_state(AppState::MainMenu)),
-                playing_input.run_if(in_state(AppState::Playing)),
-            ),
+                sample_player_input,
+                (
+                    main_menu_input.run_if(in_state(AppState::MainMenu)),
+                    playing_input.run_if(in_state(AppState::Playing)),
+                    log_player_input_probe.run_if(in_state(AppState::Playing)),
+                ),
+            )
+                .chain(),
         )
         .add_systems(
             FixedUpdate,
@@ -131,6 +138,89 @@ fn cleanup_gameplay_entities(
 ) {
     for entity in &gameplay_entities {
         commands.entity(entity).despawn();
+    }
+}
+
+/// Per-frame player input snapshot, mirroring the C# polling `InputSystem`.
+///
+/// `thrust` uses game-space axes: W is +Y, S is -Y, A is -X, D is +X.
+/// Diagonal input is normalized so it does not exceed unit length.
+#[derive(Resource, Debug, Clone, PartialEq)]
+struct PlayerInput {
+    thrust: Vec2,
+    /// Primary-window cursor position in screen pixels. A later gameplay phase
+    /// will convert this through the camera once world entities exist.
+    aim_screen: Option<Vec2>,
+    fire: bool,
+    skill_dash: bool,
+    skill_turbo: bool,
+    skill_slowmo: bool,
+}
+
+impl Default for PlayerInput {
+    fn default() -> Self {
+        Self {
+            thrust: Vec2::ZERO,
+            aim_screen: None,
+            fire: false,
+            skill_dash: false,
+            skill_turbo: false,
+            skill_slowmo: false,
+        }
+    }
+}
+
+fn sample_player_input(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    primary_window: Query<&Window, With<PrimaryWindow>>,
+    mut player_input: ResMut<PlayerInput>,
+) {
+    let mut thrust = Vec2::ZERO;
+    if keyboard.pressed(KeyCode::KeyW) {
+        thrust.y += 1.0;
+    }
+    if keyboard.pressed(KeyCode::KeyS) {
+        thrust.y -= 1.0;
+    }
+    if keyboard.pressed(KeyCode::KeyA) {
+        thrust.x -= 1.0;
+    }
+    if keyboard.pressed(KeyCode::KeyD) {
+        thrust.x += 1.0;
+    }
+    if thrust.length_squared() > 1.0 {
+        thrust = thrust.normalize();
+    }
+
+    *player_input = PlayerInput {
+        thrust,
+        aim_screen: primary_window
+            .single()
+            .ok()
+            .and_then(Window::cursor_position),
+        fire: mouse.pressed(MouseButton::Left),
+        skill_dash: keyboard.just_pressed(KeyCode::KeyQ),
+        skill_turbo: keyboard.just_pressed(KeyCode::KeyE),
+        skill_slowmo: keyboard.just_pressed(KeyCode::KeyR),
+    };
+}
+
+/// Temporary Phase 2 input probe; replace once Phase 5 wires this resource into
+/// real player movement, weapons, and skills.
+#[derive(Resource, Default)]
+struct PlayerInputLogProbe {
+    frames: u64,
+    last_logged: Option<PlayerInput>,
+}
+
+fn log_player_input_probe(input: Res<PlayerInput>, mut probe: ResMut<PlayerInputLogProbe>) {
+    probe.frames += 1;
+
+    let changed = probe.last_logged.as_ref() != Some(&*input);
+    if changed || probe.frames % 120 == 0 {
+        info!("player input probe: {:?}", *input);
+        probe.last_logged = Some(input.clone());
     }
 }
 
@@ -236,8 +326,9 @@ fn seed_fractures(
 }
 
 /// Advance live fractures each fixed step; when a body splits, despawn it and
-/// spawn its fragments. Mirrors `FractureCrackSystem` + `split_live`/`build_result`
-/// + `AsteroidSplitSystem`. (Uses `drive_to_completion` for brevity; a real port
+/// spawn its fragments. Mirrors `FractureCrackSystem`,
+/// `split_live`/`build_result`, and `AsteroidSplitSystem`. (Uses
+/// `drive_to_completion` for brevity; a real port
 /// would step by each front's per-frame pacing and use `split_live` mid-crack.)
 fn advance_fractures(
     mut commands: Commands,
