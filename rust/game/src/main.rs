@@ -2,6 +2,8 @@
 //! system layer that replaces the C# `FractureService` (ECS half) +
 //! `FractureCrackSystem` + `AsteroidSplitSystem`. All physics stays in the crate.
 
+use std::time::Instant;
+
 use bevy::{log::info, prelude::*};
 use fracture::{
     build_result, compute_energy, count_components, drive_to_completion, seed_process,
@@ -19,14 +21,49 @@ fn main() {
             }),
             ..default()
         }))
+        .insert_resource(Time::<Fixed>::from_seconds(1.0 / 120.0))
+        .insert_resource(FixedTickProbe::default())
         .add_event::<ImpactEvent>()
         .add_systems(Startup, log_startup)
-        .add_systems(FixedUpdate, (seed_fractures, advance_fractures).chain())
+        .add_systems(
+            FixedUpdate,
+            (seed_fractures, advance_fractures, log_fixed_tick_rate).chain(),
+        )
         .run();
 }
 
 fn log_startup() {
     info!("Asteroids on Steroids Bevy app started");
+}
+
+/// Temporary Phase 2 timing probe; replace once real fixed-step gameplay exists.
+#[derive(Resource)]
+struct FixedTickProbe {
+    ticks: u64,
+    started: Instant,
+}
+
+impl Default for FixedTickProbe {
+    fn default() -> Self {
+        Self {
+            ticks: 0,
+            started: Instant::now(),
+        }
+    }
+}
+
+fn log_fixed_tick_rate(mut probe: ResMut<FixedTickProbe>) {
+    probe.ticks += 1;
+
+    if probe.ticks % 240 == 0 {
+        let elapsed = probe.started.elapsed().as_secs_f64();
+        info!(
+            "fixed timestep probe: {} ticks in {:.2}s ({:.1} Hz)",
+            probe.ticks,
+            elapsed,
+            probe.ticks as f64 / elapsed
+        );
+    }
 }
 
 /// The C# `FracturableBody` struct becomes a Bevy Component by wrapping the pure
