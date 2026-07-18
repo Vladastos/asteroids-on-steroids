@@ -17,6 +17,7 @@ bevy = { workspace = true, features = [
     "bevy_ui",
     "bevy_log",
     "bevy_state",
+    "png",           # screenshot capture (diagnostics) + PNG image assets
     "webgl2",        # browser target
     "x11",           # native dev (drop for pure-wasm builds)
 ] }

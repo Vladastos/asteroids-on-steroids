@@ -82,6 +82,7 @@ fn main() {
                 ),
                 draw_bullets,
                 attach_fracturable_body_meshes,
+                diagnostic_screenshot,
             )
                 .chain(),
         )
@@ -148,6 +149,37 @@ fn enter_game_over() {
 
 fn exit_game_over() {
     info!("Exiting GameOver");
+}
+
+/// Opt-in diagnostic: set `ASTEROIDS_SCREENSHOT_AND_EXIT=1` to capture one
+/// screenshot to `/tmp/asteroids_screenshot.png` shortly after startup, then
+/// exit. Verifies the renderer independently of whatever the display
+/// transport (e.g. WSLg/RDP) is doing — no-op unless the env var is set,
+/// matching the `ASTEROIDS_VERIFY_AUTOFIRE` pattern used elsewhere.
+fn diagnostic_screenshot(
+    mut commands: Commands,
+    mut app_exit: EventWriter<AppExit>,
+    mut frame: Local<u32>,
+    mut triggered: Local<bool>,
+) {
+    if std::env::var_os("ASTEROIDS_SCREENSHOT_AND_EXIT").is_none() {
+        return;
+    }
+
+    *frame += 1;
+    if !*triggered && *frame == 30 {
+        *triggered = true;
+        commands
+            .spawn(bevy::render::view::screenshot::Screenshot::primary_window())
+            .observe(bevy::render::view::screenshot::save_to_disk(
+                "/tmp/asteroids_screenshot.png",
+            ));
+        info!("diagnostic screenshot triggered at frame 30");
+    }
+    if *triggered && *frame >= 60 {
+        info!("exiting after screenshot capture window");
+        app_exit.write(AppExit::Success);
+    }
 }
 
 fn main_menu_input(
