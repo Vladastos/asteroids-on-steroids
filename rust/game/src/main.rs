@@ -2,12 +2,14 @@
 //! system layer that replaces the C# `FractureService` (ECS half) +
 //! `FractureCrackSystem` + `AsteroidSplitSystem`. All physics stays in the crate.
 
+pub mod collision;
 pub mod components;
 pub mod rendering;
 pub mod systems;
 
 use std::time::Instant;
 
+use crate::collision::*;
 use bevy::{log::info, prelude::*, window::PrimaryWindow};
 use bevy_vector_shapes::prelude::*;
 use components::*;
@@ -40,9 +42,11 @@ fn main() {
         .init_resource::<DemoForceProbe>()
         .init_resource::<PlayerInput>()
         .init_resource::<PlayerInputLogProbe>()
+        .init_resource::<CollisionGrid>()
         .add_event::<ImpactEvent>()
         .add_event::<BulletHitEvent>()
         .add_event::<GrenadeDetonateEvent>()
+        .add_event::<CollisionEvent>()
         .add_systems(
             Startup,
             (
@@ -85,6 +89,7 @@ fn main() {
                 previous_state_system,
                 physics_system,
                 movement_system,
+                collision_system,
                 log_demo_movement_probe,
                 seed_fractures,
                 advance_fractures,

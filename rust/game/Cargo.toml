@@ -22,5 +22,5 @@ bevy = { workspace = true, features = [
 ] }
 bevy_vector_shapes.workspace = true
 fracture   = { path = "../crates/fracture" }
-# collision = { path = "../crates/collision" }
+collision = { path = "../crates/collision" }
 # game-core = { path = "../crates/game-core" }

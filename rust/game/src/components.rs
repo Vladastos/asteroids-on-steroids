@@ -2,6 +2,17 @@
 
 use bevy::prelude::*;
 
+/// Attaches a collision shape to an entity.
+///
+/// Port of C# `Engine/Components/Collider.cs`.
+#[derive(Component)]
+pub struct Collider {
+    pub shape: collision::Shape,
+    pub layer: i32,
+    pub mask: i32,
+    pub sensor: bool,
+}
+
 /// Previous fixed-step pose captured for render interpolation.
 ///
 /// Port of the previous-pose half of C# `Engine/Components/Transform.cs`.
