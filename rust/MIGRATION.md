@@ -16,7 +16,8 @@ Guiding principles:
 - **Verify each phase.** No phase is "done" without the stated check passing.
 
 Progress legend: `[ ]` todo · `[~]` in progress · `[x]` done.
-Phase 1 (all of it — fracture, collision, game-core) is complete under `rust/`.
+Phase 1 (fracture, collision, game-core) and Phase 2 (Bevy app skeleton) are
+complete under `rust/`.
 
 ---
 
@@ -138,29 +139,51 @@ JSON falls back to defaults instead of erroring.
 
 ---
 
-## Phase 2 — Bevy app skeleton `[ ]`
+## Phase 2 — Bevy app skeleton `[x]`
 
 **Goal:** a window opens, the fixed loop ticks, states transition. No gameplay yet.
+**Complete.** All 5 steps done, verified (`cargo build`/`clippy -p game` clean,
+`cargo run -p game` confirmed live under WSLg X11/llvmpipe), committed:
+`c3446c3` → `af00c8b` → `d7a7c91` → `2f897bf` → `064aed5`.
 
-1. `game` crate `main.rs`: `App::new().add_plugins(DefaultPlugins)`.
-2. **Fixed timestep:** configure `Time<Fixed>` to 1/120 s; gameplay systems go in the
-   `FixedUpdate` schedule (replaces `FixedTimestep.Advance`). Rendering/interpolation
-   in `Update`.
-3. **States:** port `GameCore/States/*` to `bevy_state`:
-   `#[derive(States)] enum AppState { MainMenu, Playing, WaveComplete, GameOver }`.
-   - `IGameState.Enter/Exit` → `OnEnter(state)` / `OnExit(state)` systems.
-   - `IGameState.Update → IGameState?` (pointer swap) → set `NextState<AppState>`.
-   - "Each PlayingState owns its World; teardown destroys entities" → tag gameplay
-     entities with a marker component; `OnExit(Playing)` despawns all of them.
-4. **Input:** `Engine/Input/InputSystem.cs` + `KeyCode.cs` → Bevy `ButtonInput<KeyCode>`
-   / `ButtonInput<MouseButton>` + cursor position resource. Map WASD/mouse/Q-E-R/Esc.
-5. **EventBus** → Bevy `Events<T>`: one `#[derive(Event)]` per current event type
-   (`CollisionEvent`, gameplay events in `Gameplay/Events/`). `Publish→EventWriter`,
-   `Subscribe→EventReader`. Bevy double-buffers events across frames — mind ordering
-   vs. the old explicit `Flush()`.
+1. `[x]` `game` crate `main.rs`: `App::new().add_plugins(DefaultPlugins)` +
+   `WindowPlugin` (title "Asteroids on Steroids", 1280×720, resizable).
+2. `[x]` **Fixed timestep:** `Time::<Fixed>::from_seconds(1.0/120.0)` (Bevy's
+   default is 64Hz, not 120 — this was an actual bug the step fixed).
+   Gameplay systems (fracture glue) stay in `FixedUpdate`. Verified ~118Hz
+   observed under software-rendering overhead. Render interpolation deferred
+   to Phase 3+ (no per-entity Transform history exists yet).
+3. `[x]` **States:** `AppState { MainMenu, Playing, WaveComplete, GameOver }`
+   via `bevy_state`, `OnEnter`/`OnExit` logging per state, `GameplayEntity`
+   marker despawned `OnExit(Playing)`. Wired end-to-end: Enter/Space in
+   MainMenu → spawn + transition to Playing; Escape in Playing → back to
+   MainMenu (triggers cleanup); Escape in MainMenu → `AppExit`.
+   `PlayingState`'s real content (ECS world, systems, wave manager, HUD) is
+   deliberately NOT ported — `Playing` is an empty placeholder until Phase 5.
+4. `[x]` **Input:** `PlayerInput` resource sampled every `Update` frame
+   (unconditional, matching `InputSystem.BeginFrame()`): WASD → normalized
+   thrust axis, primary-window cursor → `aim_screen` (camera conversion is a
+   later phase), left-click → `fire`, Q/E/R → one-shot
+   dash/turbo/slowmo triggers. Not wired to any entity yet (none exist).
+5. `[x]` **EventBus** → Bevy `Events<T>`: `BulletHitEvent` +
+   `GrenadeDetonateEvent` ported as `#[derive(Event)]` structs, following the
+   pattern the fracture glue's `ImpactEvent` already established. Bevy's
+   `Events<T>` IS the deferred publish/flush model — no bridge code needed.
+   Noted (doc comment) that C#'s `PublishImmediate<T>()` has no direct Bevy
+   equivalent; use an explicitly-ordered/exclusive system if ever needed.
+
+**Process note:** all 5 steps were delegated to `codex exec` (workspace-write
+sandbox + network access, approved by the user), one task per step, each
+independently verified (`cargo build`/`clippy` rerun by the reviewer, diff
+scope checked) before commit — not just trusted from codex's own report.
+
+**Temporary scaffolding left in `game/src/main.rs`** (explicitly commented as
+such in the code) that Phase 3+ will remove/replace: `FixedTickProbe` (tick
+rate demo), `PlayerInputLogProbe` (input demo), `GameplayEventProbe` (event
+demo). None of these are real gameplay — don't mistake them for it.
 
 **Deliverable:** window opens; pressing a key logs a state transition MainMenu→Playing.
-**Verify:** `cargo run -p game` shows the window and transitions on input.
+**Verify:** `cargo run -p game` shows the window and transitions on input. ✅
 
 ---
 
@@ -311,5 +334,7 @@ JSON falls back to defaults instead of erroring.
 
 ## Suggested order of next PRs
 1. ~~Phase 1 (fracture + collision + game-core), fully ported and tested~~ — **done**.
-2. **Phases 2–3** — Bevy app, states, components, movement (skeleton comes alive).
-3. **Phase 4 minimal + Phase 5 fracture glue** — one asteroid you can shoot and shatter on screen (the vertical slice).
+2. ~~Phase 2 (Bevy app, fixed timestep, states, input, events)~~ — **done**.
+3. **Phase 3** — Components & ECS mapping: real component structs, movement/physics
+   systems over queries, wire the temporary probes' data into actual entities.
+4. **Phase 4 minimal + Phase 5 fracture glue** — one asteroid you can shoot and shatter on screen (the vertical slice).
