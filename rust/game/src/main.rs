@@ -2,7 +2,7 @@
 //! system layer that replaces the C# `FractureService` (ECS half) +
 //! `FractureCrackSystem` + `AsteroidSplitSystem`. All physics stays in the crate.
 
-use bevy::prelude::*;
+use bevy::{log::info, prelude::*};
 use fracture::{
     build_result, compute_energy, count_components, drive_to_completion, seed_process,
     FracturableBody as PureBody, FractureInput, FractureProcess as PureProcess, Rng, WeaponProfile,
@@ -10,10 +10,23 @@ use fracture::{
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "Asteroids on Steroids".into(),
+                resolution: (1280., 720.).into(),
+                resizable: true,
+                ..default()
+            }),
+            ..default()
+        }))
         .add_event::<ImpactEvent>()
+        .add_systems(Startup, log_startup)
         .add_systems(FixedUpdate, (seed_fractures, advance_fractures).chain())
         .run();
+}
+
+fn log_startup() {
+    info!("Asteroids on Steroids Bevy app started");
 }
 
 /// The C# `FracturableBody` struct becomes a Bevy Component by wrapping the pure

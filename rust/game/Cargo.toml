@@ -15,6 +15,7 @@ bevy = { workspace = true, features = [
     "bevy_sprite",   # Mesh2d path for lyon-tessellated fills
     "bevy_text",
     "bevy_ui",
+    "bevy_log",
     "webgl2",        # browser target
     "x11",           # native dev (drop for pure-wasm builds)
 ] }
