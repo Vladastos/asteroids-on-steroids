@@ -3,6 +3,7 @@
 //! `FractureCrackSystem` + `AsteroidSplitSystem`. All physics stays in the crate.
 
 pub mod components;
+pub mod systems;
 
 use std::time::Instant;
 
@@ -12,6 +13,7 @@ use fracture::{
     build_result, compute_energy, count_components, drive_to_completion, seed_process,
     FracturableBody as PureBody, FractureInput, FractureProcess as PureProcess, Rng, WeaponProfile,
 };
+use systems::*;
 
 fn main() {
     App::new()
@@ -28,12 +30,13 @@ fn main() {
         .insert_resource(Time::<Fixed>::from_seconds(1.0 / 120.0))
         .insert_resource(FixedTickProbe::default())
         .insert_resource(GameplayEventProbe::default())
+        .init_resource::<DemoMovementProbe>()
         .init_resource::<PlayerInput>()
         .init_resource::<PlayerInputLogProbe>()
         .add_event::<ImpactEvent>()
         .add_event::<BulletHitEvent>()
         .add_event::<GrenadeDetonateEvent>()
-        .add_systems(Startup, log_startup)
+        .add_systems(Startup, (log_startup, spawn_demo_movers).chain())
         .add_systems(OnEnter(AppState::MainMenu), enter_main_menu)
         .add_systems(OnExit(AppState::MainMenu), exit_main_menu)
         .add_systems(OnEnter(AppState::Playing), enter_playing)
@@ -60,7 +63,15 @@ fn main() {
         )
         .add_systems(
             FixedUpdate,
-            (seed_fractures, advance_fractures, log_fixed_tick_rate).chain(),
+            (
+                previous_state_system,
+                movement_system,
+                log_demo_movement_probe,
+                seed_fractures,
+                advance_fractures,
+                log_fixed_tick_rate,
+            )
+                .chain(),
         )
         .run();
 }
@@ -79,7 +90,7 @@ enum AppState {
 }
 
 #[derive(Component)]
-struct GameplayEntity;
+pub(crate) struct GameplayEntity;
 
 fn enter_main_menu() {
     info!("Entering MainMenu");
