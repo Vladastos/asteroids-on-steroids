@@ -74,7 +74,7 @@ fn main() {
                     log_player_input_probe.run_if(in_state(AppState::Playing)),
                 ),
                 draw_demo_movers,
-                draw_fracturable_bodies,
+                attach_fracturable_body_meshes,
                 (publish_gameplay_event_probe, log_gameplay_event_probe).chain(),
             )
                 .chain(),

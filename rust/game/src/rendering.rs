@@ -1,6 +1,11 @@
 //! Rendering systems for the Bevy port.
 
-use bevy::prelude::*;
+use bevy::{
+    asset::RenderAssetUsages,
+    prelude::*,
+    render::mesh::{Indices, Mesh2d, PrimitiveTopology},
+    sprite::{ColorMaterial, MeshMaterial2d},
+};
 use bevy_vector_shapes::prelude::*;
 
 use crate::components::PreviousTransform;
@@ -38,25 +43,64 @@ pub(crate) fn draw_demo_movers(
     }
 }
 
-pub(crate) fn draw_fracturable_bodies(
-    mut painter: ShapePainter,
-    bodies: Query<(&Transform, &FracturableBodyComp)>,
+pub(crate) fn attach_fracturable_body_meshes(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    bodies: Query<(Entity, &FracturableBodyComp), Added<FracturableBodyComp>>,
 ) {
-    painter.hollow = false;
+    for (entity, body) in &bodies {
+        commands.entity(entity).insert((
+            Mesh2d(meshes.add(build_body_mesh(&body.0))),
+            MeshMaterial2d(materials.add(ColorMaterial::default())),
+        ));
+    }
+}
 
-    for (transform, body) in &bodies {
-        let body_position = transform.translation.truncate();
-        let body_rotation = transform.rotation.to_euler(EulerRot::ZYX).0;
-        let z = transform.translation.z;
+fn build_body_mesh(body: &fracture::FracturableBody) -> Mesh {
+    let vertex_count = body.cells.iter().map(|cell| cell.local.len()).sum();
+    let index_count = body
+        .cells
+        .iter()
+        .map(|cell| cell.local.len().saturating_sub(2) * 3)
+        .sum();
+    let mut positions = Vec::with_capacity(vertex_count);
+    let mut colors = Vec::with_capacity(vertex_count);
+    let mut indices = Vec::with_capacity(index_count);
 
-        for (index, cell) in body.0.cells.iter().enumerate() {
-            let world_centroid = local_to_world(cell.centroid, body_position, body_rotation);
-            painter.set_translation(world_centroid.extend(z));
-            painter.set_rotation(Quat::IDENTITY);
-            painter.set_color(cell_placeholder_color(index, cell.area));
-            painter.circle((cell.area / std::f32::consts::PI).sqrt());
+    for (cell_index, cell) in body.cells.iter().enumerate() {
+        if cell.local.len() < 3 {
+            continue;
+        }
+
+        let start_vertex =
+            u32::try_from(positions.len()).expect("fracturable body mesh exceeds u32 vertices");
+        let color = cell_mesh_color(cell_index, cell.area).to_linear().to_f32_array();
+
+        for vertex in &cell.local {
+            positions.push([vertex.x, vertex.y, 0.0]);
+            colors.push(color);
+        }
+
+        for triangle_index in 1..cell.local.len() - 1 {
+            let triangle_index =
+                u32::try_from(triangle_index).expect("fracturable cell mesh exceeds u32 vertices");
+            indices.extend_from_slice(&[
+                start_vertex,
+                start_vertex + triangle_index,
+                start_vertex + triangle_index + 1,
+            ]);
         }
     }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
 }
 
 fn lerp_angle(previous: f32, current: f32, alpha: f32) -> f32 {
@@ -66,12 +110,7 @@ fn lerp_angle(previous: f32, current: f32, alpha: f32) -> f32 {
     previous + delta * alpha
 }
 
-fn local_to_world(local: Vec2, position: Vec2, rotation: f32) -> Vec2 {
-    let (sin, cos) = rotation.sin_cos();
-    Vec2::new(local.x * cos - local.y * sin, local.x * sin + local.y * cos) + position
-}
-
-fn cell_placeholder_color(index: usize, area: f32) -> Color {
+fn cell_mesh_color(index: usize, area: f32) -> Color {
     let index_shade = (index % 7) as f32 * 0.035;
     let area_shade = ((area / 600.0).clamp(0.0, 1.0) - 0.5) * 0.08;
     let shade = index_shade + area_shade;
