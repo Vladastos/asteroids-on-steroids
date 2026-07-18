@@ -8,8 +8,6 @@ pub mod prefabs;
 pub mod rendering;
 pub mod systems;
 
-use std::time::Instant;
-
 use crate::collision::*;
 use bevy::{log::info, prelude::*, window::PrimaryWindow};
 use bevy_vector_shapes::prelude::*;
@@ -36,13 +34,8 @@ fn main() {
         .add_plugins(Shape2dPlugin::default())
         .init_state::<AppState>()
         .insert_resource(Time::<Fixed>::from_seconds(1.0 / 120.0))
-        .insert_resource(FixedTickProbe::default())
-        .insert_resource(GameplayEventProbe::default())
         .init_resource::<Gravity>()
-        .init_resource::<DemoMovementProbe>()
-        .init_resource::<DemoForceProbe>()
         .init_resource::<PlayerInput>()
-        .init_resource::<PlayerInputLogProbe>()
         .init_resource::<CollisionGrid>()
         .init_resource::<CellBudget>()
         .add_event::<ImpactEvent>()
@@ -54,7 +47,6 @@ fn main() {
             (
                 log_startup,
                 spawn_camera,
-                spawn_demo_movers,
                 spawn_test_asteroid,
                 spawn_verification_bullet,
             )
@@ -79,12 +71,9 @@ fn main() {
                     main_menu_input.run_if(in_state(AppState::MainMenu)),
                     playing_input.run_if(in_state(AppState::Playing)),
                     fire_bullet_on_click.run_if(in_state(AppState::Playing)),
-                    log_player_input_probe.run_if(in_state(AppState::Playing)),
                 ),
-                draw_demo_movers,
                 draw_bullets,
                 attach_fracturable_body_meshes,
-                (publish_gameplay_event_probe, log_gameplay_event_probe).chain(),
             )
                 .chain(),
         )
@@ -96,11 +85,8 @@ fn main() {
                 movement_system,
                 collision_system,
                 publish_collision_impacts,
-                log_demo_movement_probe,
                 seed_fractures,
                 advance_fractures,
-                log_fixed_tick_rate,
-                apply_demo_force_probe,
             )
                 .chain(),
         )
@@ -194,6 +180,7 @@ fn cleanup_gameplay_entities(
 ///
 /// `thrust` uses game-space axes: W is +Y, S is -Y, A is -X, D is +X.
 /// Diagonal input is normalized so it does not exceed unit length.
+#[allow(dead_code)]
 #[derive(Resource, Debug, Clone, PartialEq)]
 struct PlayerInput {
     thrust: Vec2,
@@ -255,54 +242,6 @@ fn sample_player_input(
     };
 }
 
-/// Temporary Phase 2 input probe; replace once Phase 5 wires this resource into
-/// real player movement, weapons, and skills.
-#[derive(Resource, Default)]
-struct PlayerInputLogProbe {
-    frames: u64,
-    last_logged: Option<PlayerInput>,
-}
-
-fn log_player_input_probe(input: Res<PlayerInput>, mut probe: ResMut<PlayerInputLogProbe>) {
-    probe.frames += 1;
-
-    let changed = probe.last_logged.as_ref() != Some(&*input);
-    if changed || probe.frames % 120 == 0 {
-        info!("player input probe: {:?}", *input);
-        probe.last_logged = Some(input.clone());
-    }
-}
-
-/// Temporary Phase 2 timing probe; replace once real fixed-step gameplay exists.
-#[derive(Resource)]
-struct FixedTickProbe {
-    ticks: u64,
-    started: Instant,
-}
-
-impl Default for FixedTickProbe {
-    fn default() -> Self {
-        Self {
-            ticks: 0,
-            started: Instant::now(),
-        }
-    }
-}
-
-fn log_fixed_tick_rate(mut probe: ResMut<FixedTickProbe>) {
-    probe.ticks += 1;
-
-    if probe.ticks % 240 == 0 {
-        let elapsed = probe.started.elapsed().as_secs_f64();
-        info!(
-            "fixed timestep probe: {} ticks in {:.2}s ({:.1} Hz)",
-            probe.ticks,
-            elapsed,
-            probe.ticks as f64 / elapsed
-        );
-    }
-}
-
 /// The C# `FracturableBody` struct becomes a Bevy Component by wrapping the pure
 /// type — the pure data does the physics, the Component makes it ECS-addressable.
 #[derive(Component)]
@@ -326,6 +265,7 @@ struct ImpactEvent {
 ///
 /// Port of C# `BulletHitEvent`. `struck_cell` is `usize` to match the pure
 /// fracture crate's cell indexing.
+#[allow(dead_code)]
 #[derive(Event)]
 struct BulletHitEvent {
     target: Entity,
@@ -340,70 +280,12 @@ struct BulletHitEvent {
 /// Port of C# `GrenadeDetonateEvent`. `weapon_key` stays a `String` because
 /// authored weapon ids are data-driven strings in the source game; later phases
 /// can intern or enum-ize them once the real weapon catalog is ported.
+#[allow(dead_code)]
 #[derive(Event)]
 struct GrenadeDetonateEvent {
     grenade: Entity,
     world_pos: Vec2,
     weapon_key: String,
-}
-
-/// Temporary Phase 2 EventBus probe; remove once Phase 5 gameplay systems
-/// publish real bullet and grenade events.
-///
-/// Bevy's `Events<T>` maps to the C# deferred `Publish<T>()` + per-frame
-/// `Flush()` convention: a writer emits an event and later systems in the
-/// schedule read it through `EventReader<T>`. If the C# `PublishImmediate<T>()`
-/// pattern is ever truly needed, prefer an explicitly ordered/exclusive system
-/// call, or accept Bevy's same-frame "next system in the schedule" latency.
-#[derive(Resource, Default)]
-struct GameplayEventProbe {
-    published: bool,
-}
-
-fn publish_gameplay_event_probe(
-    mut probe: ResMut<GameplayEventProbe>,
-    mut bullet_hits: EventWriter<BulletHitEvent>,
-    mut grenade_detonations: EventWriter<GrenadeDetonateEvent>,
-) {
-    if probe.published {
-        return;
-    }
-    probe.published = true;
-
-    // Placeholder entities make the event flow observable before Phase 5 adds
-    // real bullets, grenades, and targets.
-    let placeholder = Entity::PLACEHOLDER;
-    bullet_hits.write(BulletHitEvent {
-        target: placeholder,
-        bullet: placeholder,
-        struck_cell: 0,
-        point: Vec2::ZERO,
-        shot_dir: Vec2::Y,
-    });
-    grenade_detonations.write(GrenadeDetonateEvent {
-        grenade: placeholder,
-        world_pos: Vec2::ZERO,
-        weapon_key: "phase2_probe_grenade".to_owned(),
-    });
-}
-
-fn log_gameplay_event_probe(
-    mut bullet_hits: EventReader<BulletHitEvent>,
-    mut grenade_detonations: EventReader<GrenadeDetonateEvent>,
-) {
-    for ev in bullet_hits.read() {
-        info!(
-            "gameplay event probe: BulletHitEvent target={:?} bullet={:?} struck_cell={} point={:?} shot_dir={:?}",
-            ev.target, ev.bullet, ev.struck_cell, ev.point, ev.shot_dir
-        );
-    }
-
-    for ev in grenade_detonations.read() {
-        info!(
-            "gameplay event probe: GrenadeDetonateEvent grenade={:?} world_pos={:?} weapon_key={}",
-            ev.grenade, ev.world_pos, ev.weapon_key
-        );
-    }
 }
 
 fn publish_collision_impacts(
