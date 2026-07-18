@@ -3,16 +3,19 @@
 //! `FractureCrackSystem` + `AsteroidSplitSystem`. All physics stays in the crate.
 
 pub mod components;
+pub mod rendering;
 pub mod systems;
 
 use std::time::Instant;
 
 use bevy::{log::info, prelude::*, window::PrimaryWindow};
+use bevy_vector_shapes::prelude::*;
 use components::*;
 use fracture::{
     build_result, compute_energy, count_components, drive_to_completion, seed_process,
     FracturableBody as PureBody, FractureInput, FractureProcess as PureProcess, Rng, WeaponProfile,
 };
+use rendering::*;
 use systems::*;
 
 fn main() {
@@ -26,6 +29,7 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins(Shape2dPlugin::default())
         .init_state::<AppState>()
         .insert_resource(Time::<Fixed>::from_seconds(1.0 / 120.0))
         .insert_resource(FixedTickProbe::default())
@@ -38,7 +42,10 @@ fn main() {
         .add_event::<ImpactEvent>()
         .add_event::<BulletHitEvent>()
         .add_event::<GrenadeDetonateEvent>()
-        .add_systems(Startup, (log_startup, spawn_demo_movers).chain())
+        .add_systems(
+            Startup,
+            (log_startup, spawn_camera, spawn_demo_movers).chain(),
+        )
         .add_systems(OnEnter(AppState::MainMenu), enter_main_menu)
         .add_systems(OnExit(AppState::MainMenu), exit_main_menu)
         .add_systems(OnEnter(AppState::Playing), enter_playing)
@@ -59,6 +66,7 @@ fn main() {
                     playing_input.run_if(in_state(AppState::Playing)),
                     log_player_input_probe.run_if(in_state(AppState::Playing)),
                 ),
+                draw_demo_movers,
                 (publish_gameplay_event_probe, log_gameplay_event_probe).chain(),
             )
                 .chain(),
