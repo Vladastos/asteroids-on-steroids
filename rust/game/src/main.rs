@@ -24,9 +24,12 @@ fn main() {
         .init_state::<AppState>()
         .insert_resource(Time::<Fixed>::from_seconds(1.0 / 120.0))
         .insert_resource(FixedTickProbe::default())
+        .insert_resource(GameplayEventProbe::default())
         .init_resource::<PlayerInput>()
         .init_resource::<PlayerInputLogProbe>()
         .add_event::<ImpactEvent>()
+        .add_event::<BulletHitEvent>()
+        .add_event::<GrenadeDetonateEvent>()
         .add_systems(Startup, log_startup)
         .add_systems(OnEnter(AppState::MainMenu), enter_main_menu)
         .add_systems(OnExit(AppState::MainMenu), exit_main_menu)
@@ -48,6 +51,7 @@ fn main() {
                     playing_input.run_if(in_state(AppState::Playing)),
                     log_player_input_probe.run_if(in_state(AppState::Playing)),
                 ),
+                (publish_gameplay_event_probe, log_gameplay_event_probe).chain(),
             )
                 .chain(),
         )
@@ -280,6 +284,90 @@ struct ImpactEvent {
     dir: Vec2,
     normal_speed: f32,
     impactor_mass: f32,
+}
+
+/// A bullet raycast struck a fracturable body.
+///
+/// Port of C# `BulletHitEvent`. `struck_cell` is `usize` to match the pure
+/// fracture crate's cell indexing.
+#[derive(Event)]
+struct BulletHitEvent {
+    target: Entity,
+    bullet: Entity,
+    struck_cell: usize,
+    point: Vec2,
+    shot_dir: Vec2,
+}
+
+/// A grenade reached its fuse end or hit something and should detonate.
+///
+/// Port of C# `GrenadeDetonateEvent`. `weapon_key` stays a `String` because
+/// authored weapon ids are data-driven strings in the source game; later phases
+/// can intern or enum-ize them once the real weapon catalog is ported.
+#[derive(Event)]
+struct GrenadeDetonateEvent {
+    grenade: Entity,
+    world_pos: Vec2,
+    weapon_key: String,
+}
+
+/// Temporary Phase 2 EventBus probe; remove once Phase 5 gameplay systems
+/// publish real bullet and grenade events.
+///
+/// Bevy's `Events<T>` maps to the C# deferred `Publish<T>()` + per-frame
+/// `Flush()` convention: a writer emits an event and later systems in the
+/// schedule read it through `EventReader<T>`. If the C# `PublishImmediate<T>()`
+/// pattern is ever truly needed, prefer an explicitly ordered/exclusive system
+/// call, or accept Bevy's same-frame "next system in the schedule" latency.
+#[derive(Resource, Default)]
+struct GameplayEventProbe {
+    published: bool,
+}
+
+fn publish_gameplay_event_probe(
+    mut probe: ResMut<GameplayEventProbe>,
+    mut bullet_hits: EventWriter<BulletHitEvent>,
+    mut grenade_detonations: EventWriter<GrenadeDetonateEvent>,
+) {
+    if probe.published {
+        return;
+    }
+    probe.published = true;
+
+    // Placeholder entities make the event flow observable before Phase 5 adds
+    // real bullets, grenades, and targets.
+    let placeholder = Entity::PLACEHOLDER;
+    bullet_hits.write(BulletHitEvent {
+        target: placeholder,
+        bullet: placeholder,
+        struck_cell: 0,
+        point: Vec2::ZERO,
+        shot_dir: Vec2::Y,
+    });
+    grenade_detonations.write(GrenadeDetonateEvent {
+        grenade: placeholder,
+        world_pos: Vec2::ZERO,
+        weapon_key: "phase2_probe_grenade".to_owned(),
+    });
+}
+
+fn log_gameplay_event_probe(
+    mut bullet_hits: EventReader<BulletHitEvent>,
+    mut grenade_detonations: EventReader<GrenadeDetonateEvent>,
+) {
+    for ev in bullet_hits.read() {
+        info!(
+            "gameplay event probe: BulletHitEvent target={:?} bullet={:?} struck_cell={} point={:?} shot_dir={:?}",
+            ev.target, ev.bullet, ev.struck_cell, ev.point, ev.shot_dir
+        );
+    }
+
+    for ev in grenade_detonations.read() {
+        info!(
+            "gameplay event probe: GrenadeDetonateEvent grenade={:?} world_pos={:?} weapon_key={}",
+            ev.grenade, ev.world_pos, ev.weapon_key
+        );
+    }
 }
 
 /// On impact: compute energy (pure) and seed a `FractureProcess` component
