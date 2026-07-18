@@ -16,8 +16,8 @@ Guiding principles:
 - **Verify each phase.** No phase is "done" without the stated check passing.
 
 Progress legend: `[ ]` todo · `[~]` in progress · `[x]` done.
-Phase 1 (fracture, collision, game-core) and Phase 2 (Bevy app skeleton) are
-complete under `rust/`.
+Phase 1 (fracture, collision, game-core), Phase 2 (Bevy app skeleton), and
+Phase 3 (components & ECS mapping) are complete under `rust/`.
 
 ---
 
@@ -187,28 +187,50 @@ demo). None of these are real gameplay — don't mistake them for it.
 
 ---
 
-## Phase 3 — Components & ECS mapping `[ ]`
+## Phase 3 — Components & ECS mapping `[x]`
 
 **Goal:** entities exist with the right data; movement runs.
+**Complete.** All 3 steps done, verified (`cargo build`/`clippy -p game`
+clean each time, runtime logs confirmed correct behavior), committed:
+`aca3bbb` → `5013960` → `03626e2`.
 
-1. Port `Engine/Components/*` and `Gameplay/Components/*` to
-   `#[derive(Component)]` structs (glam types). `ref`-mutation → `&mut` in queries
-   (Rust does this natively and more safely than C# `ref` returns).
-2. Tags (`Engine/Components/Tags.cs`, `Gameplay/Components/Tags.cs`) → unit-struct
-   marker components (`#[derive(Component)] struct Player;`).
-3. Wrap pure-crate data for the ECS where needed:
-   `#[derive(Component)] struct FracturableBodyComp(fracture::FracturableBody)`
-   (already shown in `game/src/main.rs`). Keep the pure type unpolluted.
-4. Port simple systems to verify the query model:
-   - `MovementSystem.cs` / `PhysicsSystem.cs` → `FixedUpdate` systems over
-     `Query<(&mut Transform, &Velocity)>`. `ForEach<T1,T2>` → `for .. in &mut query`.
-   - `PreviousStateSystem.cs` → store prev transform for render interpolation.
-5. **Parallelism:** do **not** port `ForEachParallel`/`Parallel.For`. Let Bevy's
-   scheduler parallelize disjoint systems automatically. Accept single-threaded in
-   wasm (Phase 6 note).
+1. `[x]` `rust/game/src/components.rs`: `Velocity`, `RigidBody` (mass, linear/
+   angular drag, inertia, accumulated force/torque, restitution, friction,
+   sleep state), `PreviousTransform` (the render-interpolation half of C#
+   `Transform.cs` — current pose stays on Bevy's built-in 3D `Transform`,
+   already used by the Phase 2 fracture glue). Gameplay tags `PlayerTag`/
+   `AsteroidTag`/`AlienTag`/`BulletTag`/`AlienBulletTag` +
+   key-holders `AsteroidVariant`/`AlienVariant`/`AsteroidTypeKey`.
+   `DisabledTag` ported as an opt-in filter marker; `DestroyTag` skipped
+   (Bevy's `Commands::despawn` already covers that role).
+2. `[x]` The Phase 2 fracture glue's temporary `Body` stand-in was deleted
+   and replaced with the real `RigidBody` + `Velocity` components.
+3. `[x]` `rust/game/src/systems.rs`: `previous_state_system` (snapshot before
+   any mutation — registered first, matching the C#'s documented ordering),
+   `physics_system` (symplectic-Euler force integration + exponential drag,
+   faithful port of `PhysicsSystem.cs` including the `Gravity` resource and
+   `apply_force`/`apply_force_at_point` free functions), `movement_system`
+   (kinematic `Transform += Velocity * dt` via `Time<Fixed>::delta_secs()`).
+   `FixedUpdate` order: `previous_state_system → physics_system →
+   movement_system → (fracture glue)` — matches the C#'s documented
+   `PhysicsSystem → MovementSystem → CollisionSystem` sequence.
+4. `[x]` **Parallelism:** confirmed no `ForEachParallel`/`Parallel.For`
+   equivalent was ported — Bevy's scheduler parallelizes disjoint systems
+   automatically, nothing extra needed.
 
-**Deliverable:** spawn a few entities; they move under the fixed step.
-**Verify:** headless or on-screen, positions advance correctly vs. dt.
+**Verified live:** 3 temporary demo entities (`DemoMover`) prove kinematic
+motion; one of them additionally carries a `RigidBody` and a temporary force
+probe that pushes it for 120 ticks — runtime logs confirmed velocity rising
+under the applied force, then decaying under drag once the probe stopped,
+with position tracking velocity exactly. This is the Phase 3 deliverable.
+
+**Temporary scaffolding in `game/src/systems.rs`** (commented as such) that
+Phase 5 replaces with real prefabs: `DemoMover`, `DemoForceMover`,
+`DemoMovementProbe`, `DemoForceProbe`, `spawn_demo_movers`,
+`apply_demo_force_probe`.
+
+**Deliverable:** spawn a few entities; they move under the fixed step. ✅
+**Verify:** headless or on-screen, positions advance correctly vs. dt. ✅
 
 ---
 
@@ -335,6 +357,5 @@ demo). None of these are real gameplay — don't mistake them for it.
 ## Suggested order of next PRs
 1. ~~Phase 1 (fracture + collision + game-core), fully ported and tested~~ — **done**.
 2. ~~Phase 2 (Bevy app, fixed timestep, states, input, events)~~ — **done**.
-3. **Phase 3** — Components & ECS mapping: real component structs, movement/physics
-   systems over queries, wire the temporary probes' data into actual entities.
-4. **Phase 4 minimal + Phase 5 fracture glue** — one asteroid you can shoot and shatter on screen (the vertical slice).
+3. ~~Phase 3 (components, previous-state/physics/movement systems)~~ — **done**.
+4. **Phase 4 minimal + Phase 5 fracture glue** — one asteroid you can shoot and shatter on screen (the vertical slice). This is the next milestone: it will finally replace the Phase 2/3 demo scaffolding (`FixedTickProbe`, `PlayerInputLogProbe`, `GameplayEventProbe`, `DemoMover`/`DemoForceMover`) with real rendering + real asteroid prefabs.
