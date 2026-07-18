@@ -19,12 +19,14 @@ Progress legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 Phase 1 (fracture, collision, game-core), Phase 2 (Bevy app skeleton),
 Phase 3 (components & ECS mapping), and Phase 4 (rendering) are all complete
 under `rust/`. Phase 5 is in progress: the VERTICAL SLICE (shoot a real
-asteroid, watch it really crack then split into real fragment entities) and
+asteroid, watch it really crack then split into real fragment entities),
 ROUND 2 (`game-core` config wired in; a real, flyable player ship with WASD
-thrust + mouse aim + camera follow) are both done and verified live. Bullets
-are NOT yet wired to the player ship — that plus aliens, waves, scoring,
-skills, VFX, and the boss remain — see Phase 5's section for the exact
-breakdown. An actual visual/screenshot verification of the renderer is still
+thrust + mouse aim + camera follow), and ROUND 3 (bullets now fire from the
+player's actual position/aim, connecting round 2's ship to the vertical
+slice's fracture pipeline) are all done and verified live — "fly, shoot,
+fracture asteroids" all genuinely work end to end now. Aliens, waves,
+scoring, skills, VFX, and the boss remain — see Phase 5's section for the
+exact breakdown. An actual visual/screenshot verification of the renderer is still
 owed (no screenshot tooling has been available in the dev environment used
 so far), and no interactive input testing has been possible either (same
 reason).
@@ -301,7 +303,7 @@ top of this renderer.
 
 ---
 
-## Phase 5 — Gameplay systems & the fracture glue `[~]` (vertical slice + round 2 done; full scope remains)
+## Phase 5 — Gameplay systems & the fracture glue `[~]` (fly/shoot/fracture all work; full scope remains)
 
 **Goal:** the actual game, running natively. This phase is much bigger than
 Phases 1-4 combined — the C# reference's `Gameplay/` covers prefabs, waves,
@@ -387,6 +389,16 @@ proven live. Committed: `8ca7d94` → `ee42844` → `69a23bc` → `019300f`.
    since `physics_system` skips sleeping bodies). Fixed before commit;
    `apply_force_at_point` also restored (was lost entirely, kept for API
    parity even though nothing calls it yet).
+10. `[x]` **Bullet firing wired to the player** (`rust/game/src/prefabs.rs::
+    fire_bullet_on_click`) — bullets now spawn from the player's actual
+    position (offset 48px forward along its aim direction, clearing the
+    ship's mesh) and travel along its real `AimComponent.dir`, replacing the
+    fixed launch-point/direction constants. This connects round 2's player
+    ship to the vertical slice's bullet/fracture pipeline — the two were
+    built independently and only joined here.
+    `spawn_verification_bullet` (the `ASTEROIDS_VERIFY_AUTOFIRE` regression
+    helper) deliberately kept its own fixed-point path — still useful as a
+    player-independent test of the fracture pipeline alone.
 
 **Verified live** (`ASTEROIDS_VERIFY_AUTOFIRE=1 cargo run -p game`, an
 opt-in env-gated 3-bullet burst left in place for repeatable regression
@@ -403,18 +415,12 @@ report.
   (`count_components() ≤ 1` treats "one piece" and "nothing left" the same).
 - No `FractureGroup` sibling-collision suppression — freshly-split fragments
   may nudge each other slightly via the solver before separating.
-- Bullets still fire from a fixed launch point in a fixed direction — they
-  are NOT wired to the player ship's position/aim yet (the player ship and
-  the bullet system were built in the same round but not connected to each
-  other — that's the natural next step). Camera follow has no smoothing.
+- Camera follow has no smoothing (direct snap each frame).
 - No mouse/keyboard input has been interactively tested in this environment
   (no input-injection tooling available) — aim/movement/firing are verified
   by code review and type-checking only, not an actual play session.
 
 ### NOT started yet — full C# `Gameplay/` scope remains
-- Bullets fired FROM the player ship, at the player's aim direction — the
-  player ship (Round 2) and the bullet prefab (vertical slice) both exist
-  but are not yet connected.
 - `AlienPrefab`, `MothershipPrefab`, `PiercingPrefab` — no aliens, mothership,
   or the piercing-round weapon variant.
 - Waves (`WaveSystemConfig`/`WaveDefinition`), scoring (`Score.cs`), skills
@@ -432,9 +438,8 @@ report.
   item 3) — not implemented.
 
 **Deliverable (original, full-phase):** playable native build: fly, shoot,
-fracture asteroids, waves advance. ⚠️ Partially met — flying works (WASD +
-mouse aim, real config-driven thrust), fracture works, but bullets aren't
-wired to the ship yet and there are no waves.
+fracture asteroids, waves advance. ⚠️ Partially met — fly, shoot, and
+fracture asteroids all work end to end now; no waves yet.
 **Verify:** run `/verify`-style playthrough; compare feel/behaviour to C#
 reference. ⚠️ Not yet possible as a full playthrough (no input-injection
 tooling to actually test flying/aiming interactively in this environment);
@@ -514,11 +519,9 @@ sequence above.
 6. ~~Phase 5 round 2 (`game-core` config wired in; real, flyable player ship
    — WASD thrust, real mouse-to-world aim, camera follow)~~ — **done and
    verified live.**
-7. **Wire the bullet to the player** (fire from the ship's position, along
-   its aim direction, gated by `PlayerInput.fire`) — the natural next step:
-   both halves exist (Round 2's player, the vertical slice's bullet) but
-   aren't connected yet. This is the last piece before a real "fly around
-   and shoot" playthrough is possible.
+7. ~~Phase 5 round 3 (bullets fire from the player's real position/aim)~~ —
+   **done and verified live: fly, shoot, and fracture asteroids all
+   genuinely work end to end.**
 8. **Rest of Phase 5** — aliens (`AlienPrefab`/`MothershipPrefab`,
    `PiercingPrefab`), waves, scoring, skills (Q/E/R — already sampled,
    nothing consumes it), weapon-role-gated firing/thrust penalty, weapon
