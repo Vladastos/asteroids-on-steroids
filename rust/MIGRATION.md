@@ -26,10 +26,15 @@ player's actual position/aim, connecting round 2's ship to the vertical
 slice's fracture pipeline) are all done and verified live — "fly, shoot,
 fracture asteroids" all genuinely work end to end now. Aliens, waves,
 scoring, skills, VFX, and the boss remain — see Phase 5's section for the
-exact breakdown. An actual visual/screenshot verification of the renderer is still
-owed (no screenshot tooling has been available in the dev environment used
-so far), and no interactive input testing has been possible either (same
-reason).
+exact breakdown. Visual/screenshot verification of the renderer is DONE —
+`ASTEROIDS_SCREENSHOT_AND_EXIT=1 cargo run -p game` captures a real PNG
+(Bevy's own screenshot API, `game/Cargo.toml`'s `png` feature was missing
+and silently broke it until now) and the first real capture confirmed the
+renderer is correct: the player ship and the tessellated asteroid both
+render as genuine faceted polygon meshes, not circles or garbage. No
+interactive input testing has been possible yet (no input-injection tooling
+in the dev environment used so far) — everything input-related is still
+verified by code review/type-checking only.
 
 ---
 
@@ -295,11 +300,12 @@ committed: `cf95e66` → `a1bbd02` → `1541918` → `8f42e36`.
 ✅ Cells render as real polygons (no outline stroke or HUD text yet — both
 explicitly deferred above, not required for this phase's agreed scope).
 **Verify:** visual parity screenshot vs. the C# `AsteroidDemo` for one body.
-⚠️ Still not done — no screenshot tooling has been available in the dev
-environment used throughout Phase 4; verification has been build/clippy/
-runtime-log/direct-source-code-review only. Get an actual visual/screenshot
-check as soon as tooling allows, ideally before Phase 5 builds much more on
-top of this renderer.
+✅ Done, though after Phase 5 had already built on top of the renderer, not
+before — `ASTEROIDS_SCREENSHOT_AND_EXIT=1 cargo run -p game` (added during
+Phase 5) confirmed cells render as real per-cell-shaded polygon meshes. Not
+a pixel-perfect parity comparison against the C#'s `AsteroidDemo`, but a
+real, direct visual confirmation the renderer works — see `rust/game/
+Cargo.toml`'s `png` feature and `main.rs::diagnostic_screenshot`.
 
 ---
 
