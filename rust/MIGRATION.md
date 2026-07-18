@@ -17,7 +17,9 @@ Guiding principles:
 
 Progress legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 Phase 1 (fracture, collision, game-core), Phase 2 (Bevy app skeleton), and
-Phase 3 (components & ECS mapping) are complete under `rust/`.
+Phase 3 (components & ECS mapping) are complete under `rust/`. Phase 4
+(rendering) bring-up is done but left an open finding — see its section
+below before starting Phase 5.
 
 ---
 
@@ -234,35 +236,58 @@ Phase 5 replaces with real prefabs: `DemoMover`, `DemoForceMover`,
 
 ---
 
-## Phase 4 — Rendering `[ ]`
+## Phase 4 — Rendering `[x]` (bring-up complete; polygon-fill gap open)
 
 **Goal:** replace `IRenderer` immediate-mode drawing. Biggest single effort.
+**Bring-up complete.** All 3 steps done, verified, committed:
+`cf95e66` → `a1bbd02` → `1541918`. **Important finding changes the picture
+below** — see the callout after the step list.
 
-1. **Primary path — `bevy_vector_shapes`:** immediate-mode filled polygons, lines,
-   circles → maps closely to `DrawLine/FillPolygon/DrawCircle/FillCircle`. Add the
-   `Shape2dPlugin`; draw in a system with the `ShapePainter`.
-2. **`FillPath` (multi-contour, nonzero winding)** — the one primitive with no direct
-   equivalent (used to draw a whole body's cells seamlessly). Two options:
-   - Tessellate cells with `lyon` → one `Mesh2d` per body, rebuilt when the cell set
-     changes (i.e. on fracture, not every frame). Best quality/perf.
-   - Or draw each convex cell as a separate `bevy_vector_shapes` polygon and accept a
-     faint AA seam (the C# `FillPath` doc explicitly exists to avoid that seam —
-     decide if it matters).
-3. **Camera:** port `Engine/Rendering/Camera.cs` to a `Camera2d` + transform; the
-   world is ~10× screen, so drive camera follow + zoom. `PushTransform/PopTransform`
-   (camera + per-entity) → entity `Transform` hierarchy, which Bevy handles.
-4. **Text:** `DrawText/MeasureText/FontSpec` → `bevy_text` (`Text2d` for world,
-   `Text` UI nodes for HUD). Not immediate-mode: spawn/update text entities. Bundle a
-   `.ttf` (matching the current font) as an asset.
-5. **Render interpolation:** the C# loop draws at sub-step `alpha`. Reproduce by
-   lerping between `PreviousState` and current `Transform` in an `Update` system.
-6. **Colour:** `Engine/Rendering/Color.cs` + `Cell.fill_color` (`Rgba`) →
-   `bevy::Color`. Convert at draw time in the `game` crate (keeps `fracture` renderer-free).
-7. **Post effects:** `IPostEffects.Distort` is optional/feature-detected — skip for v1
-   (or later add a fullscreen shader material). The vortex/warp VFX are nice-to-have.
+1. `[x]` **`bevy_vector_shapes`:** `Shape2dPlugin` registered, `Camera2d`
+   spawned (static, no follow/zoom yet — nothing to follow until Phase 5 has
+   a player). Demo-mover circles draw via `ShapePainter` in `Update`.
+2. `[x]` **Render interpolation:** `draw_demo_movers` lerps between
+   `PreviousTransform` and current `Transform` using
+   `Time<Fixed>::overstep_fraction()` as alpha, with a proper shortest-path
+   angle lerp for rotation. Closes out the Phase 3 `PreviousTransform`
+   component.
+3. `[x]` **Real tessellated body rendering:** one static test asteroid
+   spawned via `fracture::build_asteroid` (41 cells), wrapped in the
+   existing `FracturableBodyComp`, drawn via `draw_fracturable_bodies`.
+
+> **🚧 `bevy_vector_shapes` 0.10.0 has NO arbitrary-vertex polygon fill
+> primitive** (verified against its docs.rs `ShapePainter` API — only discs,
+> lines, rects, regular n-gons, triangles). So real cells currently render as
+> **filled circles at each cell's centroid** (radius `√(area/π)`), not their
+> actual polygon shape. This is not the "accept a faint AA seam between
+> polygons" tradeoff the plan originally anticipated (option 2 above) — it's
+> a harder wall: **no polygon fill at all** without a different approach.
+> **The `lyon` → `Mesh2d` path (option 2's other branch) is now REQUIRED, not
+> optional polish**, before Phase 5's shoot-and-shatter vertical slice will
+> visually read as fractured polygon cells rather than a cluster of circles.
+> This is the top item for whoever picks up rendering next — either wire
+> lyon tessellation into a `Mesh2d` per body (rebuilt on fracture, not every
+> frame), or evaluate a different shape-drawing crate/approach before
+> building more visuals on top of the circle placeholder.
+
+4. `[ ]` **Camera follow/zoom, world ~10× screen** — deferred; no entity
+   worth following exists yet (Phase 5).
+5. `[ ]` **Text/HUD** (`bevy_text`) — deferred, scoped out of Phase 4 by
+   agreement; revisit once real UI is needed.
+6. `[ ]` **Colour** (`Cell.fill_color` → `bevy::Color`) — deferred. The test
+   asteroid uses a placeholder per-cell gray shade; `CellColorizer.cs`
+   (density-darken/rim-light/neighbour-blend/role-tint) is explicitly NOT
+   ported yet — that's gameplay-visual polish, later.
+7. `[ ]` **Post effects** (`IPostEffects.Distort`) — still skipped for v1 per
+   the original plan.
 
 **Deliverable:** an asteroid body renders as filled cells with outline + HUD text.
+⚠️ Partially met: cells render (as circles, not polygons); no outline/HUD yet.
 **Verify:** visual parity screenshot vs. the C# `AsteroidDemo` for one body.
+⚠️ Not yet possible — no screenshot tooling available in the dev environment
+used so far; only build/clippy/runtime-log verification was done. Whoever
+continues should get an actual screenshot/visual check once the polygon-fill
+gap above is closed.
 
 ---
 
@@ -358,4 +383,13 @@ Phase 5 replaces with real prefabs: `DemoMover`, `DemoForceMover`,
 1. ~~Phase 1 (fracture + collision + game-core), fully ported and tested~~ — **done**.
 2. ~~Phase 2 (Bevy app, fixed timestep, states, input, events)~~ — **done**.
 3. ~~Phase 3 (components, previous-state/physics/movement systems)~~ — **done**.
-4. **Phase 4 minimal + Phase 5 fracture glue** — one asteroid you can shoot and shatter on screen (the vertical slice). This is the next milestone: it will finally replace the Phase 2/3 demo scaffolding (`FixedTickProbe`, `PlayerInputLogProbe`, `GameplayEventProbe`, `DemoMover`/`DemoForceMover`) with real rendering + real asteroid prefabs.
+4. ~~Phase 4 bring-up (camera, bevy_vector_shapes, interpolation, one real
+   tessellated body rendering)~~ — **done, with an open finding: no polygon
+   fill, cells render as circles.**
+5. **Close the polygon-fill gap** (lyon → `Mesh2d`, or an alternative), THEN
+   **Phase 5 fracture glue** — one asteroid you can shoot and shatter on
+   screen, actually looking like fractured polygon cells (the real vertical
+   slice). This will also replace the Phase 2-4 demo scaffolding
+   (`FixedTickProbe`, `PlayerInputLogProbe`, `GameplayEventProbe`,
+   `DemoMover`/`DemoForceMover`, the test asteroid in `spawn_test_asteroid`)
+   with real rendering + real asteroid prefabs.
