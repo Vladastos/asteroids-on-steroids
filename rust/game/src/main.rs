@@ -4,6 +4,7 @@
 
 pub mod collision;
 pub mod components;
+pub mod config;
 pub mod prefabs;
 pub mod rendering;
 pub mod systems;
@@ -12,6 +13,7 @@ use crate::collision::*;
 use bevy::{log::info, prelude::*, window::PrimaryWindow};
 use bevy_vector_shapes::prelude::*;
 use components::*;
+use config::*;
 use fracture::{
     build_result, compute_energy, count_components, drive_to_completion, seed_process,
     FracturableBody as PureBody, FractureInput, FractureProcess as PureProcess, Rng, WeaponProfile,
@@ -45,6 +47,7 @@ fn main() {
         .add_systems(
             Startup,
             (
+                load_game_config,
                 log_startup,
                 spawn_camera,
                 spawn_test_asteroid,

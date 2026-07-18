@@ -1910,6 +1910,7 @@ dependencies = [
  "bevy_vector_shapes",
  "collision",
  "fracture",
+ "game-core",
 ]
 
 [[package]]

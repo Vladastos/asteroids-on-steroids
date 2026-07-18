@@ -6,6 +6,7 @@ use fracture::{FracturableBody, FractureProperties, Rng};
 use crate::{
     collision::game_layers,
     components::{AsteroidTag, BulletTag, Collider, PreviousTransform, RigidBody, Velocity},
+    config::{material_to_fracture_properties, GameConfigRes},
     FracturableBodyComp, GameplayEntity,
 };
 
@@ -46,9 +47,13 @@ impl CellBudget {
     }
 }
 
-pub(crate) fn spawn_test_asteroid(mut commands: Commands, mut budget: ResMut<CellBudget>) {
+pub(crate) fn spawn_test_asteroid(
+    mut commands: Commands,
+    mut budget: ResMut<CellBudget>,
+    config: Res<GameConfigRes>,
+) {
     let mut rng = Rng::new(0x5eed);
-    spawn_asteroid(&mut commands, &mut budget, ASTEROID_POS, &mut rng);
+    spawn_asteroid(&mut commands, &mut budget, &config, ASTEROID_POS, &mut rng);
 }
 
 pub(crate) fn spawn_verification_bullet(mut commands: Commands) {
@@ -72,16 +77,12 @@ pub(crate) fn spawn_verification_bullet(mut commands: Commands) {
 pub(crate) fn spawn_asteroid(
     commands: &mut Commands,
     budget: &mut CellBudget,
+    config: &GameConfigRes,
     pos: Vec2,
     rng: &mut Rng,
 ) -> Entity {
-    let body = fracture::build_asteroid(
-        ASTEROID_SIDES,
-        ASTEROID_RADIUS,
-        asteroid_material(),
-        None,
-        rng,
-    );
+    let material = asteroid_material(config);
+    let body = fracture::build_asteroid(ASTEROID_SIDES, ASTEROID_RADIUS, material, None, rng);
     let (mass, inertia) = mass_and_inertia(&body);
     let collider = fracturable_body_collider(&body);
     let cell_count = body.cells.len();
@@ -111,8 +112,8 @@ pub(crate) fn spawn_asteroid(
 
     budget.add(cell_count as i32);
     info!(
-        "spawned asteroid cells={} mass={:.3} inertia={:.3} cell_budget={}",
-        cell_count, mass, inertia, budget.count
+        "spawned asteroid cells={} mass={:.3} inertia={:.3} cell_budget={} material=rock toughness={:.3} grain_area={:.3}",
+        cell_count, mass, inertia, budget.count, material.toughness, material.grain_area
     );
 
     entity
@@ -232,22 +233,14 @@ fn asteroid_rigid_body_defaults() -> RigidBody {
     }
 }
 
-fn asteroid_material() -> FractureProperties {
-    FractureProperties {
-        toughness: 24.0,
-        restitution: 0.3,
-        relax_rate: 100.0,
-        brittleness: 0.55,
-        crack_speed: 200.0,
-        grain_area: 380.0,
-        min_fragment_area: 100.0,
-        density: 1.0,
-        cell_toughness: 1.0,
-        spin_pre_stress: 0.1,
-        crack_directionality: 0.3,
-        detach_cell_scale: 0.9,
-        detach_cell_jitter: 0.02,
-    }
+fn asteroid_material(config: &GameConfigRes) -> FractureProperties {
+    let material = config
+        .0
+        .materials
+        .get("rock")
+        .expect("game_config.json must define a 'rock' material");
+
+    material_to_fracture_properties(material)
 }
 
 fn mass_and_inertia(body: &FracturableBody) -> (f32, f32) {
