@@ -18,9 +18,13 @@ Guiding principles:
 Progress legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 Phase 1 (fracture, collision, game-core), Phase 2 (Bevy app skeleton),
 Phase 3 (components & ECS mapping), and Phase 4 (rendering) are all complete
-under `rust/`. No known blockers remain before Phase 5, though an actual
-visual/screenshot verification of the renderer is still owed (no screenshot
-tooling has been available in the dev environment used so far).
+under `rust/`. Phase 5's VERTICAL SLICE is done and verified live: shoot a
+real asteroid, watch it really crack then split into real fragment entities.
+Full Phase 5 (player ship, aliens, waves, scoring, skills, VFX, boss,
+game-core config wiring) remains — see Phase 5's section for the exact
+breakdown. An actual visual/screenshot verification of the renderer is still
+owed (no screenshot tooling has been available in the dev environment used
+so far).
 
 ---
 
@@ -294,34 +298,106 @@ top of this renderer.
 
 ---
 
-## Phase 5 — Gameplay systems & the fracture glue `[ ]`
+## Phase 5 — Gameplay systems & the fracture glue `[~]` (vertical slice done; full scope remains)
 
-**Goal:** the actual game, running natively.
+**Goal:** the actual game, running natively. This phase is much bigger than
+Phases 1-4 combined — the C# reference's `Gameplay/` covers prefabs, waves,
+scoring, skills, VFX, aliens, and a boss. **This round scoped down to the
+vertical slice** the earlier phases were explicitly building toward:
+collision + a real asteroid + a bullet + the fracture glue actually firing,
+proven live. Committed: `8ca7d94` → `ee42844` → `69a23bc` → `019300f`.
 
-1. **Prefabs** (`Gameplay/Prefabs/*`): static `Create(world, …)` factories →
-   Rust `fn spawn_*(commands: &mut Commands, …) -> Entity` helpers (or Bevy `Bundle`s).
-   `AsteroidPrefab`, `PlayerPrefab`, `AlienPrefab`, `MothershipPrefab`, `PiercingPrefab`.
-2. **Collision system** (`Engine/Systems/CollisionSystem.cs`): broad phase (Phase 1c
-   `SpatialGrid`) + narrow phase in a `FixedUpdate` system; on contact, apply impulse
-   (needs `RigidBody`/`Velocity`) and emit `CollisionEvent`.
-3. **Fracture glue** (the payoff — small): a system reads impact events, calls
-   `fracture::try_fracture` / `begin_fracture`, and on `fractured` despawns the body +
-   spawns `FragmentSpec`s via the prefab helper. See `game/src/main.rs::apply_impacts`
-   — that pattern is the template. Multi-frame: store `FractureProcess` as a
-   Component, advance with `split_live` each `FixedUpdate` (replaces
-   `FractureCrackSystem`), emit dust on pulverized cells.
-4. **Gameplay systems** (`Gameplay/Systems/*`, `BossSystem.cs`): waves
-   (`WaveSystemConfig`/`WaveDefinition`), scoring (`Score.cs`), skills (dash/turbo/
-   slow-mo — Q/E/R), weapon effects, particles/VFX (`ParticleEffects`, `VortexFx`,
-   `WeaponEffects`). Port incrementally; each is an independent system.
-5. **Cell budget** (`Gameplay/CellBudget.cs`): global cap on live cells → a Bevy
-   `Resource`; enforce in the fracture-spawn system (convert overflow to debris).
-6. **GameContext** (`Gameplay/GameContext.cs`): the shared bag (Config, Shapes, Score,
-   CellBudget, Random) → split into Bevy `Resource`s. Use a seeded RNG resource
-   (`rand` + a fixed seed) for determinism.
+### Vertical slice — DONE and verified live
+1. `[x]` **Collision system** (`Engine/Systems/CollisionSystem.cs`) — full
+   port in `rust/game/src/collision.rs`: broad phase via
+   `collision::SpatialGrid<Entity>`, narrow phase via
+   `collision::intersects`/`collect_contacts` (including the asymmetric
+   compound-vs-compound routing — collect from whichever body has more
+   parts, flip vs. swap-parts depending on which side was authoritative),
+   full sequential-impulse solver (6 iterations, normal + Coulomb friction,
+   accumulated + clamped), Baumgarte positional correction, sleeping. All C#
+   tuning constants ported verbatim. `CollisionEvent` emitted per resolved
+   pair. `FractureGroup` sibling-suppression NOT ported (see rough edges
+   below). Includes a passing unit test.
+2. `[x]` **A real asteroid prefab** (`rust/game/src/prefabs.rs::spawn_asteroid`)
+   — reuses `fracture::build_asteroid` (not the C#'s full clustering/
+   procedural-noise/vortex-response `AsteroidPrefab.cs`, deliberately
+   simplified for this slice), with a REAL `Collider` (a `collision::Compound`
+   built from the body's cell polygons — the glue conversion Phase 1/4 always
+   said belonged in `game`, not the pure crates) and real mass/inertia
+   (density-weighted area + parallel-axis sum, matching
+   `VoronoiTessellator.TotalMass`/`ComputeInertia` exactly).
+3. `[x]` **A minimal bullet prefab** — small sensor-collider circle (sensor
+   deliberately: avoids the solver mutating its velocity into a post-bounce
+   direction before the impact system reads its true travel direction as
+   "shot direction"), fired via left-click (`just_pressed`, one click one
+   bullet), despawned on impact.
+4. `[x]` **Fracture glue, wired to REAL collisions** — `publish_collision_impacts`
+   turns a real bullet↔asteroid `CollisionEvent` into the existing
+   `ImpactEvent`/`seed_fractures`/`advance_fractures` pipeline (built back in
+   Phase 2, sitting unused until now). `advance_fractures` now removes
+   `FractureProcessComp` on a no-split crack (so a body can be hit again —
+   without this an asteroid could only ever crack once) and spawns REAL
+   fragment entities via `prefabs::spawn_fragment` (was a no-op through
+   Phases 2-4) reusing the asteroid's component skeleton.
+5. `[x]` **Cell budget** (`Gameplay/CellBudget.cs`) — ported in `prefabs.rs`
+   (`add`/`remove`/`can_spawn`/`reset`), enforced in `spawn_fragment`
+   (overflow → debris, matching the C#'s intent).
+6. `[x]` **Bullet-mass tuning, done empirically, not guessed** — the original
+   mass (1.0) produced ~37 units of impact energy against ~400-500-unit bond
+   strengths — nowhere close to enough. Tuned (env-var-overridable via
+   `ASTEROIDS_BULLET_MASS` for further iteration) to a default that reliably
+   cracks a body on the first hit and splits it on the second — sustained
+   fire wearing a body down, matching realistic gameplay rather than
+   one-shot vaporization.
+7. `[x]` **Cleanup** — all Phase 2-4 demo/probe scaffolding removed
+   (`FixedTickProbe`, `PlayerInputLogProbe`, `GameplayEventProbe`,
+   `DemoMover`/`DemoForceMover` and their systems) now that real systems
+   prove what they existed to prove. `PlayerInput`/`sample_player_input` and
+   the `BulletHitEvent`/`GrenadeDetonateEvent` type definitions were
+   deliberately KEPT (real input layer; documented future event shapes).
 
-**Deliverable:** playable native build: fly, shoot, fracture asteroids, waves advance.
-**Verify:** run `/verify`-style playthrough; compare feel/behaviour to C# reference.
+**Verified live** (`ASTEROIDS_VERIFY_AUTOFIRE=1 cargo run -p game`, an
+opt-in env-gated 3-bullet burst left in place for repeatable regression
+testing): bullet 1 cracks the 41-cell asteroid (9 bonds broken, 7 cells
+pulverized, still one piece) → bullet 2 splits it into 2 components → two
+real fragment entities spawn (31-cell + 1-cell, sane non-NaN mass/inertia)
+→ bullet 3 correctly collides with the newly-spawned 1-cell fragment,
+proving fragments are genuinely live, collidable entities, not just visual
+artifacts. Reproduced independently, not just trusted from the implementer's
+report.
+
+**Known rough edges, deliberately not fixed in this round:**
+- A body pulverized down to exactly zero live cells doesn't get despawned
+  (`count_components() ≤ 1` treats "one piece" and "nothing left" the same).
+- No `FractureGroup` sibling-collision suppression — freshly-split fragments
+  may nudge each other slightly via the solver before separating.
+- Bullet firing is a fixed launch point + fixed direction — there is no
+  player ship, no aim-to-world conversion (camera follow/zoom was deferred
+  back in Phase 4 too), no real weapon/ammo system.
+
+### NOT started this round — full C# `Gameplay/` scope remains
+- `PlayerPrefab`, `AlienPrefab`, `MothershipPrefab`, `PiercingPrefab` — only
+  a minimal asteroid + bullet exist; no player ship, aliens, mothership, or
+  the piercing-round weapon variant.
+- Waves (`WaveSystemConfig`/`WaveDefinition`), scoring (`Score.cs`), skills
+  (dash/turbo/slow-mo — Q/E/R input already sampled in Phase 2 but nothing
+  consumes it), weapon effects, particles/VFX (`ParticleEffects`, `VortexFx`,
+  `WeaponEffects`), `BossSystem.cs`.
+- `GameContext.cs`'s shared bag (Config, Shapes, Score, CellBudget, Random)
+  is not consolidated into Bevy resources — `game-core`'s config crate
+  (Phase 1d, complete and tested) is still not wired into the `game` crate
+  at all; all tuning values used so far are hardcoded Rust constants, not
+  loaded from `Assets/game_config.json`.
+- Dust/particle emission on pulverized cells (mentioned in the original plan
+  item 3) — not implemented.
+
+**Deliverable (original, full-phase):** playable native build: fly, shoot,
+fracture asteroids, waves advance. ⚠️ Partially met — shoot + fracture works;
+no flying (no player ship), no waves.
+**Verify:** run `/verify`-style playthrough; compare feel/behaviour to C#
+reference. ⚠️ Not yet possible as a full playthrough (no player ship to fly);
+the vertical slice itself was verified via the autofire log sequence above.
 
 ---
 
@@ -389,11 +465,15 @@ top of this renderer.
 4. ~~Phase 4 (camera, bevy_vector_shapes, interpolation, real polygon-mesh
    rendering of tessellated bodies)~~ — **done, including closing the
    polygon-fill gap via fan-triangulated `Mesh2d` (no new dependency).**
-5. **Phase 5 fracture glue** — one asteroid you can shoot and shatter on
-   screen, actually looking like fractured polygon cells (the real vertical
-   slice). This will also replace the Phase 2-4 demo scaffolding
-   (`FixedTickProbe`, `PlayerInputLogProbe`, `GameplayEventProbe`,
-   `DemoMover`/`DemoForceMover`, the test asteroid in `spawn_test_asteroid`)
-   with real rendering + real asteroid prefabs. Get an actual visual/
-   screenshot check of the renderer as soon as tooling allows — still owed
-   from Phase 4.
+5. ~~Phase 5 vertical slice (collision system, real asteroid + bullet
+   prefabs, cell budget, fracture glue wired to real collisions, real
+   fragment spawning, demo-scaffolding cleanup)~~ — **done and verified
+   live: shoot a real asteroid, watch it really crack then split.**
+6. **Phase 5 full scope** — player ship (`PlayerPrefab`), aliens
+   (`AlienPrefab`/`MothershipPrefab`), waves, scoring, skills (Q/E/R —
+   already sampled, nothing consumes it), weapon effects/VFX, boss, and
+   wiring the completed `game-core` config crate (Phase 1d) into `game` so
+   tuning comes from `Assets/game_config.json` instead of hardcoded
+   constants. Also: an actual visual/screenshot check of the renderer —
+   still owed since Phase 4, no screenshot tooling available in the dev
+   environment used so far.
