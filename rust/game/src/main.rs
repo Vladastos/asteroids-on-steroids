@@ -2,9 +2,12 @@
 //! system layer that replaces the C# `FractureService` (ECS half) +
 //! `FractureCrackSystem` + `AsteroidSplitSystem`. All physics stays in the crate.
 
+pub mod components;
+
 use std::time::Instant;
 
 use bevy::{log::info, prelude::*, window::PrimaryWindow};
+use components::*;
 use fracture::{
     build_result, compute_energy, count_components, drive_to_completion, seed_process,
     FracturableBody as PureBody, FractureInput, FractureProcess as PureProcess, Rng, WeaponProfile,
@@ -267,15 +270,6 @@ struct FracturableBodyComp(PureBody);
 #[derive(Component)]
 struct FractureProcessComp(PureProcess);
 
-/// Minimal rigid-body data the fracture math needs (stand-in for RigidBody/Velocity).
-#[derive(Component)]
-struct Body {
-    mass: f32,
-    inertia: f32,
-    linear: Vec2,
-    angular: f32,
-}
-
 /// Replaces `CollisionEvent`-driven fracture dispatch (EventBus topic → Bevy event).
 #[derive(Event)]
 struct ImpactEvent {
@@ -375,10 +369,13 @@ fn log_gameplay_event_probe(
 fn seed_fractures(
     mut commands: Commands,
     mut impacts: EventReader<ImpactEvent>,
-    bodies: Query<(&FracturableBodyComp, &Transform, &Body), Without<FractureProcessComp>>,
+    bodies: Query<
+        (&FracturableBodyComp, &Transform, &RigidBody, &Velocity),
+        Without<FractureProcessComp>,
+    >,
 ) {
     for ev in impacts.read() {
-        let Ok((body, xf, rb)) = bodies.get(ev.target) else {
+        let Ok((body, xf, rigid_body, velocity)) = bodies.get(ev.target) else {
             continue;
         };
         let pos = xf.translation.truncate();
@@ -390,8 +387,8 @@ fn seed_fractures(
             ev.normal_speed,
             ev.impactor_mass,
             pos,
-            rb.mass,
-            rb.inertia,
+            rigid_body.mass,
+            rigid_body.inertia,
             body.0.material.restitution,
         );
         if e <= 0.0 && !body.0.fragile {
@@ -403,7 +400,7 @@ fn seed_fractures(
             ev.point,
             pos,
             rot,
-            rb.angular,
+            velocity.angular,
             ev.dir,
             e,
             &WeaponProfile::default(),
@@ -425,10 +422,11 @@ fn advance_fractures(
         &mut FracturableBodyComp,
         &mut FractureProcessComp,
         &Transform,
-        &Body,
+        &RigidBody,
+        &Velocity,
     )>,
 ) {
-    for (e, mut body, mut proc, xf, rb) in &mut q {
+    for (e, mut body, mut proc, xf, rigid_body, velocity) in &mut q {
         drive_to_completion(&mut body.0, &mut proc.0);
 
         let n = body.0.cells.len();
@@ -444,9 +442,9 @@ fn advance_fractures(
             blast_fraction: WeaponProfile::default().blast_fraction,
             body_position: pos,
             body_rotation: xf.rotation.to_euler(EulerRot::ZYX).0,
-            body_linear: rb.linear,
-            body_angular: rb.angular,
-            body_mass: rb.mass,
+            body_linear: velocity.linear,
+            body_angular: velocity.angular,
+            body_mass: rigid_body.mass,
         };
         let mut rng = Rng::new(body.0.state.rng_seed as u64 | 1);
         let frags = build_result(
