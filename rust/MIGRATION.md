@@ -16,10 +16,11 @@ Guiding principles:
 - **Verify each phase.** No phase is "done" without the stated check passing.
 
 Progress legend: `[ ]` todo · `[~]` in progress · `[x]` done.
-Phase 1 (fracture, collision, game-core), Phase 2 (Bevy app skeleton), and
-Phase 3 (components & ECS mapping) are complete under `rust/`. Phase 4
-(rendering) bring-up is done but left an open finding — see its section
-below before starting Phase 5.
+Phase 1 (fracture, collision, game-core), Phase 2 (Bevy app skeleton),
+Phase 3 (components & ECS mapping), and Phase 4 (rendering) are all complete
+under `rust/`. No known blockers remain before Phase 5, though an actual
+visual/screenshot verification of the renderer is still owed (no screenshot
+tooling has been available in the dev environment used so far).
 
 ---
 
@@ -236,12 +237,11 @@ Phase 5 replaces with real prefabs: `DemoMover`, `DemoForceMover`,
 
 ---
 
-## Phase 4 — Rendering `[x]` (bring-up complete; polygon-fill gap open)
+## Phase 4 — Rendering `[x]`
 
 **Goal:** replace `IRenderer` immediate-mode drawing. Biggest single effort.
-**Bring-up complete.** All 3 steps done, verified, committed:
-`cf95e66` → `a1bbd02` → `1541918`. **Important finding changes the picture
-below** — see the callout after the step list.
+**Complete against its full agreed scope.** All 4 steps done, verified,
+committed: `cf95e66` → `a1bbd02` → `1541918` → `8f42e36`.
 
 1. `[x]` **`bevy_vector_shapes`:** `Shape2dPlugin` registered, `Camera2d`
    spawned (static, no follow/zoom yet — nothing to follow until Phase 5 has
@@ -251,43 +251,46 @@ below** — see the callout after the step list.
    `Time<Fixed>::overstep_fraction()` as alpha, with a proper shortest-path
    angle lerp for rotation. Closes out the Phase 3 `PreviousTransform`
    component.
-3. `[x]` **Real tessellated body rendering:** one static test asteroid
-   spawned via `fracture::build_asteroid` (41 cells), wrapped in the
-   existing `FracturableBodyComp`, drawn via `draw_fracturable_bodies`.
+3. `[x]` **Real tessellated body rendering — genuine polygon fill.**
+   `bevy_vector_shapes` 0.10.0 was confirmed (its docs.rs API AND its actual
+   source read directly from the local cargo registry cache, AND its GitHub
+   `main` branch — three independent checks) to have NO arbitrary-vertex
+   polygon fill primitive at all (only discs, lines, rects, regular n-gons,
+   triangles). Rather than adding `lyon` or another tessellation crate, this
+   used a simpler fact: `fracture::Cell.local` is a documented invariant —
+   always convex — so it needs only fan triangulation, which is ~10 lines
+   and needs zero new dependencies. Every cell of a body is fan-triangulated
+   into ONE shared `Mesh2d` vertex/index buffer per body (not one mesh per
+   cell), so adjacent cells share interior mesh edges with no AA seam
+   between them — exactly what the C#'s `IRenderer.FillPath` existed to
+   guarantee. `attach_fracturable_body_meshes` reacts to
+   `Added<FracturableBodyComp>` (builds once at spawn, not every frame —
+   the performance shape Phase 5 needs once real fracture events start
+   changing a body's cell set). Verified against Bevy 0.16's actual
+   `examples/2d/mesh2d.rs` and `bevy_mesh::Mesh` source, not guessed.
+4. `[x]` **Colour:** placeholder per-cell gray shading via vertex colors
+   (correctly gamma-converted with `.to_linear()` for Bevy's linear color
+   space). NOTE: this is a placeholder, not `Cell.fill_color`/`CellColorizer`
+   — see the deferred items below.
 
-> **🚧 `bevy_vector_shapes` 0.10.0 has NO arbitrary-vertex polygon fill
-> primitive** (verified against its docs.rs `ShapePainter` API — only discs,
-> lines, rects, regular n-gons, triangles). So real cells currently render as
-> **filled circles at each cell's centroid** (radius `√(area/π)`), not their
-> actual polygon shape. This is not the "accept a faint AA seam between
-> polygons" tradeoff the plan originally anticipated (option 2 above) — it's
-> a harder wall: **no polygon fill at all** without a different approach.
-> **The `lyon` → `Mesh2d` path (option 2's other branch) is now REQUIRED, not
-> optional polish**, before Phase 5's shoot-and-shatter vertical slice will
-> visually read as fractured polygon cells rather than a cluster of circles.
-> This is the top item for whoever picks up rendering next — either wire
-> lyon tessellation into a `Mesh2d` per body (rebuilt on fracture, not every
-> frame), or evaluate a different shape-drawing crate/approach before
-> building more visuals on top of the circle placeholder.
-
-4. `[ ]` **Camera follow/zoom, world ~10× screen** — deferred; no entity
-   worth following exists yet (Phase 5).
-5. `[ ]` **Text/HUD** (`bevy_text`) — deferred, scoped out of Phase 4 by
-   agreement; revisit once real UI is needed.
-6. `[ ]` **Colour** (`Cell.fill_color` → `bevy::Color`) — deferred. The test
-   asteroid uses a placeholder per-cell gray shade; `CellColorizer.cs`
-   (density-darken/rim-light/neighbour-blend/role-tint) is explicitly NOT
-   ported yet — that's gameplay-visual polish, later.
-7. `[ ]` **Post effects** (`IPostEffects.Distort`) — still skipped for v1 per
-   the original plan.
+**Explicitly deferred (by agreement, not blockers — revisit later):**
+- Camera follow/zoom, world ~10× screen scaling — no entity worth following
+  exists yet (Phase 5).
+- Text/HUD (`bevy_text`) — scoped out of Phase 4 by agreement.
+- Real per-cell colour baking (`Cell.fill_color` / `CellColorizer.cs`'s
+  density-darken/rim-light/neighbour-blend/role-tint) — gameplay-visual
+  polish, later; the placeholder gray shade stands in for now.
+- Post effects (`IPostEffects.Distort`) — skipped for v1 per the original plan.
 
 **Deliverable:** an asteroid body renders as filled cells with outline + HUD text.
-⚠️ Partially met: cells render (as circles, not polygons); no outline/HUD yet.
+✅ Cells render as real polygons (no outline stroke or HUD text yet — both
+explicitly deferred above, not required for this phase's agreed scope).
 **Verify:** visual parity screenshot vs. the C# `AsteroidDemo` for one body.
-⚠️ Not yet possible — no screenshot tooling available in the dev environment
-used so far; only build/clippy/runtime-log verification was done. Whoever
-continues should get an actual screenshot/visual check once the polygon-fill
-gap above is closed.
+⚠️ Still not done — no screenshot tooling has been available in the dev
+environment used throughout Phase 4; verification has been build/clippy/
+runtime-log/direct-source-code-review only. Get an actual visual/screenshot
+check as soon as tooling allows, ideally before Phase 5 builds much more on
+top of this renderer.
 
 ---
 
@@ -383,13 +386,14 @@ gap above is closed.
 1. ~~Phase 1 (fracture + collision + game-core), fully ported and tested~~ — **done**.
 2. ~~Phase 2 (Bevy app, fixed timestep, states, input, events)~~ — **done**.
 3. ~~Phase 3 (components, previous-state/physics/movement systems)~~ — **done**.
-4. ~~Phase 4 bring-up (camera, bevy_vector_shapes, interpolation, one real
-   tessellated body rendering)~~ — **done, with an open finding: no polygon
-   fill, cells render as circles.**
-5. **Close the polygon-fill gap** (lyon → `Mesh2d`, or an alternative), THEN
-   **Phase 5 fracture glue** — one asteroid you can shoot and shatter on
+4. ~~Phase 4 (camera, bevy_vector_shapes, interpolation, real polygon-mesh
+   rendering of tessellated bodies)~~ — **done, including closing the
+   polygon-fill gap via fan-triangulated `Mesh2d` (no new dependency).**
+5. **Phase 5 fracture glue** — one asteroid you can shoot and shatter on
    screen, actually looking like fractured polygon cells (the real vertical
    slice). This will also replace the Phase 2-4 demo scaffolding
    (`FixedTickProbe`, `PlayerInputLogProbe`, `GameplayEventProbe`,
    `DemoMover`/`DemoForceMover`, the test asteroid in `spawn_test_asteroid`)
-   with real rendering + real asteroid prefabs.
+   with real rendering + real asteroid prefabs. Get an actual visual/
+   screenshot check of the renderer as soon as tooling allows — still owed
+   from Phase 4.
