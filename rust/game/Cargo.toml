@@ -16,6 +16,7 @@ bevy = { workspace = true, features = [
     "bevy_text",
     "bevy_ui",
     "bevy_log",
+    "bevy_state",
     "webgl2",        # browser target
     "x11",           # native dev (drop for pure-wasm builds)
 ] }

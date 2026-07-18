@@ -21,10 +21,29 @@ fn main() {
             }),
             ..default()
         }))
+        .init_state::<AppState>()
         .insert_resource(Time::<Fixed>::from_seconds(1.0 / 120.0))
         .insert_resource(FixedTickProbe::default())
         .add_event::<ImpactEvent>()
         .add_systems(Startup, log_startup)
+        .add_systems(OnEnter(AppState::MainMenu), enter_main_menu)
+        .add_systems(OnExit(AppState::MainMenu), exit_main_menu)
+        .add_systems(OnEnter(AppState::Playing), enter_playing)
+        .add_systems(
+            OnExit(AppState::Playing),
+            (exit_playing, cleanup_gameplay_entities).chain(),
+        )
+        .add_systems(OnEnter(AppState::WaveComplete), enter_wave_complete)
+        .add_systems(OnExit(AppState::WaveComplete), exit_wave_complete)
+        .add_systems(OnEnter(AppState::GameOver), enter_game_over)
+        .add_systems(OnExit(AppState::GameOver), exit_game_over)
+        .add_systems(
+            Update,
+            (
+                main_menu_input.run_if(in_state(AppState::MainMenu)),
+                playing_input.run_if(in_state(AppState::Playing)),
+            ),
+        )
         .add_systems(
             FixedUpdate,
             (seed_fractures, advance_fractures, log_fixed_tick_rate).chain(),
@@ -34,6 +53,85 @@ fn main() {
 
 fn log_startup() {
     info!("Asteroids on Steroids Bevy app started");
+}
+
+#[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+enum AppState {
+    #[default]
+    MainMenu,
+    Playing,
+    WaveComplete,
+    GameOver,
+}
+
+#[derive(Component)]
+struct GameplayEntity;
+
+fn enter_main_menu() {
+    info!("Entering MainMenu");
+}
+
+fn exit_main_menu() {
+    info!("Exiting MainMenu");
+}
+
+fn enter_playing() {
+    info!("Entering Playing");
+}
+
+fn exit_playing() {
+    info!("Exiting Playing");
+}
+
+fn enter_wave_complete() {
+    info!("Entering WaveComplete");
+}
+
+fn exit_wave_complete() {
+    info!("Exiting WaveComplete");
+}
+
+fn enter_game_over() {
+    info!("Entering GameOver");
+}
+
+fn exit_game_over() {
+    info!("Exiting GameOver");
+}
+
+fn main_menu_input(
+    mut commands: Commands,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut next_state: ResMut<NextState<AppState>>,
+    mut app_exit: EventWriter<AppExit>,
+) {
+    if keyboard.just_pressed(KeyCode::Escape) {
+        info!("MainMenu input: Escape pressed, quitting");
+        app_exit.write(AppExit::Success);
+        return;
+    }
+
+    if keyboard.just_pressed(KeyCode::Enter) || keyboard.just_pressed(KeyCode::Space) {
+        info!("MainMenu input: starting placeholder Playing state");
+        commands.spawn(GameplayEntity);
+        next_state.set(AppState::Playing);
+    }
+}
+
+fn playing_input(keyboard: Res<ButtonInput<KeyCode>>, mut next_state: ResMut<NextState<AppState>>) {
+    if keyboard.just_pressed(KeyCode::Escape) {
+        info!("Playing input: returning to MainMenu");
+        next_state.set(AppState::MainMenu);
+    }
+}
+
+fn cleanup_gameplay_entities(
+    mut commands: Commands,
+    gameplay_entities: Query<Entity, With<GameplayEntity>>,
+) {
+    for entity in &gameplay_entities {
+        commands.entity(entity).despawn();
+    }
 }
 
 /// Temporary Phase 2 timing probe; replace once real fixed-step gameplay exists.
@@ -102,20 +200,36 @@ fn seed_fractures(
     bodies: Query<(&FracturableBodyComp, &Transform, &Body), Without<FractureProcessComp>>,
 ) {
     for ev in impacts.read() {
-        let Ok((body, xf, rb)) = bodies.get(ev.target) else { continue };
+        let Ok((body, xf, rb)) = bodies.get(ev.target) else {
+            continue;
+        };
         let pos = xf.translation.truncate();
         let rot = xf.rotation.to_euler(EulerRot::ZYX).0;
 
         let e = compute_energy(
-            ev.point, ev.dir, ev.normal_speed, ev.impactor_mass, pos, rb.mass, rb.inertia,
+            ev.point,
+            ev.dir,
+            ev.normal_speed,
+            ev.impactor_mass,
+            pos,
+            rb.mass,
+            rb.inertia,
             body.0.material.restitution,
         );
         if e <= 0.0 && !body.0.fragile {
             continue;
         }
         let proc = seed_process(
-            &body.0, -1, ev.point, pos, rot, rb.angular, ev.dir, e,
-            &WeaponProfile::default(), ev.normal_speed,
+            &body.0,
+            -1,
+            ev.point,
+            pos,
+            rot,
+            rb.angular,
+            ev.dir,
+            e,
+            &WeaponProfile::default(),
+            ev.normal_speed,
         );
         commands.entity(ev.target).insert(FractureProcessComp(proc));
     }
@@ -127,7 +241,13 @@ fn seed_fractures(
 /// would step by each front's per-frame pacing and use `split_live` mid-crack.)
 fn advance_fractures(
     mut commands: Commands,
-    mut q: Query<(Entity, &mut FracturableBodyComp, &mut FractureProcessComp, &Transform, &Body)>,
+    mut q: Query<(
+        Entity,
+        &mut FracturableBodyComp,
+        &mut FractureProcessComp,
+        &Transform,
+        &Body,
+    )>,
 ) {
     for (e, mut body, mut proc, xf, rb) in &mut q {
         drive_to_completion(&mut body.0, &mut proc.0);
@@ -151,7 +271,13 @@ fn advance_fractures(
         };
         let mut rng = Rng::new(body.0.state.rng_seed as u64 | 1);
         let frags = build_result(
-            &body.0, &input, &proc.0.broken, &proc.0.pulverized, &proc.0.fling_e, &mut rng, true,
+            &body.0,
+            &input,
+            &proc.0.broken,
+            &proc.0.pulverized,
+            &proc.0.fling_e,
+            &mut rng,
+            true,
         );
 
         commands.entity(e).despawn();
