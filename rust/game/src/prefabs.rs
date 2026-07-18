@@ -10,6 +10,7 @@ use crate::{
 };
 
 pub(crate) const BULLET_RADIUS: f32 = 4.0;
+pub(crate) const MAX_LIVE_CELLS: i32 = 600;
 
 const ASTEROID_SIDES: usize = 12;
 const ASTEROID_RADIUS: f32 = 80.0;
@@ -19,6 +20,7 @@ const ASTEROID_POS: Vec2 = Vec2::new(360.0, 120.0);
 
 const BULLET_LAUNCH_POS: Vec2 = Vec2::new(-520.0, 120.0);
 const BULLET_SPEED: f32 = 900.0;
+const DEFAULT_BULLET_MASS: f32 = 1000.0;
 const BULLET_DIR: Vec2 = Vec2::X;
 
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +51,24 @@ pub(crate) fn spawn_test_asteroid(mut commands: Commands, mut budget: ResMut<Cel
     spawn_asteroid(&mut commands, &mut budget, ASTEROID_POS, &mut rng);
 }
 
+pub(crate) fn spawn_verification_bullet(mut commands: Commands) {
+    if std::env::var_os("ASTEROIDS_VERIFY_AUTOFIRE").is_none() {
+        return;
+    }
+
+    for shot_index in 0..3 {
+        let pos = BULLET_LAUNCH_POS - Vec2::X * 240.0 * shot_index as f32;
+        let bullet = spawn_bullet(&mut commands, pos, BULLET_DIR);
+        info!(
+            "verification auto-fire spawned bullet={:?} shot={} mass={:.1} speed={:.1}",
+            bullet,
+            shot_index + 1,
+            bullet_mass(),
+            BULLET_SPEED
+        );
+    }
+}
+
 pub(crate) fn spawn_asteroid(
     commands: &mut Commands,
     budget: &mut CellBudget,
@@ -63,7 +83,7 @@ pub(crate) fn spawn_asteroid(
         rng,
     );
     let (mass, inertia) = mass_and_inertia(&body);
-    let collider = asteroid_collider(&body);
+    let collider = fracturable_body_collider(&body);
     let cell_count = body.cells.len();
 
     let entity = commands
@@ -83,11 +103,7 @@ pub(crate) fn spawn_asteroid(
             RigidBody {
                 mass,
                 inertia,
-                linear_drag: 0.05,
-                angular_drag: 0.05,
-                restitution: 0.3,
-                friction: 0.2,
-                ..default()
+                ..asteroid_rigid_body_defaults()
             },
             collider,
         ))
@@ -100,6 +116,56 @@ pub(crate) fn spawn_asteroid(
     );
 
     entity
+}
+
+pub(crate) fn spawn_fragment(
+    commands: &mut Commands,
+    budget: &mut CellBudget,
+    frag: &fracture::FragmentSpec,
+) -> Option<Entity> {
+    let cell_count = frag.body.cells.len() as i32;
+    if frag.is_debris || !budget.can_spawn(cell_count, MAX_LIVE_CELLS) {
+        info!(
+            "fracture fragment converted to debris cells={} is_debris={} cell_budget={}",
+            cell_count, frag.is_debris, budget.count
+        );
+        return None;
+    }
+
+    let entity = commands
+        .spawn((
+            AsteroidTag,
+            FracturableBodyComp(frag.body.clone()),
+            Transform {
+                translation: frag.world_centroid.extend(0.0),
+                rotation: Quat::from_rotation_z(frag.rotation),
+                ..default()
+            },
+            GlobalTransform::default(),
+            PreviousTransform {
+                position: frag.world_centroid,
+                rotation: frag.rotation,
+            },
+            Velocity {
+                linear: frag.linear,
+                angular: frag.angular,
+            },
+            RigidBody {
+                mass: frag.mass,
+                inertia: frag.inertia,
+                ..asteroid_rigid_body_defaults()
+            },
+            fracturable_body_collider(&frag.body),
+        ))
+        .id();
+
+    budget.add(cell_count);
+    info!(
+        "spawned fracture fragment entity={:?} cells={} mass={:.3} inertia={:.3} cell_budget={}",
+        entity, cell_count, frag.mass, frag.inertia, budget.count
+    );
+
+    Some(entity)
 }
 
 pub(crate) fn fire_bullet_on_click(mut commands: Commands, mouse: Res<ButtonInput<MouseButton>>) {
@@ -128,7 +194,7 @@ fn spawn_bullet(commands: &mut Commands, pos: Vec2, dir: Vec2) -> Entity {
                 angular: 0.0,
             },
             RigidBody {
-                mass: 1.0,
+                mass: bullet_mass(),
                 inertia: 1.0,
                 linear_drag: 0.0,
                 angular_drag: 0.0,
@@ -142,10 +208,28 @@ fn spawn_bullet(commands: &mut Commands, pos: Vec2, dir: Vec2) -> Entity {
                 },
                 layer: game_layers::BULLET,
                 mask: game_layers::ASTEROID,
-                sensor: false,
+                sensor: true,
             },
         ))
         .id()
+}
+
+fn bullet_mass() -> f32 {
+    std::env::var("ASTEROIDS_BULLET_MASS")
+        .ok()
+        .and_then(|mass| mass.parse::<f32>().ok())
+        .filter(|mass| mass.is_finite() && *mass > 0.0)
+        .unwrap_or(DEFAULT_BULLET_MASS)
+}
+
+fn asteroid_rigid_body_defaults() -> RigidBody {
+    RigidBody {
+        linear_drag: 0.05,
+        angular_drag: 0.05,
+        restitution: 0.3,
+        friction: 0.2,
+        ..default()
+    }
 }
 
 fn asteroid_material() -> FractureProperties {
@@ -191,7 +275,7 @@ fn mass_and_inertia(body: &FracturableBody) -> (f32, f32) {
     (mass, inertia)
 }
 
-fn asteroid_collider(body: &FracturableBody) -> Collider {
+fn fracturable_body_collider(body: &FracturableBody) -> Collider {
     let parts: Vec<_> = body
         .cells
         .iter()

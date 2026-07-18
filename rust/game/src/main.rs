@@ -56,6 +56,7 @@ fn main() {
                 spawn_camera,
                 spawn_demo_movers,
                 spawn_test_asteroid,
+                spawn_verification_bullet,
             )
                 .chain(),
         )
@@ -94,6 +95,7 @@ fn main() {
                 physics_system,
                 movement_system,
                 collision_system,
+                publish_collision_impacts,
                 log_demo_movement_probe,
                 seed_fractures,
                 advance_fractures,
@@ -404,6 +406,43 @@ fn log_gameplay_event_probe(
     }
 }
 
+fn publish_collision_impacts(
+    mut commands: Commands,
+    mut collisions: EventReader<CollisionEvent>,
+    bullets: Query<(&Velocity, &RigidBody), With<BulletTag>>,
+    asteroids: Query<(), With<AsteroidTag>>,
+    mut impacts: EventWriter<ImpactEvent>,
+) {
+    for ev in collisions.read() {
+        let (bullet, asteroid, bullet_velocity, bullet_body) =
+            match (bullets.get(ev.entity_a), asteroids.get(ev.entity_b)) {
+                (Ok((velocity, rigid_body)), Ok(())) => {
+                    (ev.entity_a, ev.entity_b, velocity, rigid_body)
+                }
+                _ => match (bullets.get(ev.entity_b), asteroids.get(ev.entity_a)) {
+                    (Ok((velocity, rigid_body)), Ok(())) => {
+                        (ev.entity_b, ev.entity_a, velocity, rigid_body)
+                    }
+                    _ => continue,
+                },
+            };
+
+        let shot_dir = bullet_velocity.linear.normalize_or_zero();
+        impacts.write(ImpactEvent {
+            target: asteroid,
+            point: ev.contact.contact_point,
+            dir: shot_dir,
+            normal_speed: ev.approach_speed,
+            impactor_mass: bullet_body.mass,
+        });
+        info!(
+            "collision impact: bullet={:?} asteroid={:?} point={:?} dir={:?} speed={:.3} mass={:.3}",
+            bullet, asteroid, ev.contact.contact_point, shot_dir, ev.approach_speed, bullet_body.mass
+        );
+        commands.entity(bullet).despawn();
+    }
+}
+
 /// On impact: compute energy (pure) and seed a `FractureProcess` component
 /// (pure). Mirrors `FractureService.BeginFracture`'s fresh-process branch.
 fn seed_fractures(
@@ -434,6 +473,10 @@ fn seed_fractures(
         if e <= 0.0 && !body.0.fragile {
             continue;
         }
+        info!(
+            "seed fracture: target={:?} energy={:.3} normal_speed={:.3} impactor_mass={:.3}",
+            ev.target, e, ev.normal_speed, ev.impactor_mass
+        );
         let proc = seed_process(
             &body.0,
             -1,
@@ -465,14 +508,33 @@ fn advance_fractures(
         &RigidBody,
         &Velocity,
     )>,
+    mut budget: ResMut<CellBudget>,
 ) {
     for (e, mut body, mut proc, xf, rigid_body, velocity) in &mut q {
         drive_to_completion(&mut body.0, &mut proc.0);
 
         let n = body.0.cells.len();
-        if count_components(n, &body.0.bonds, &proc.0.broken, &proc.0.pulverized) <= 1 {
-            continue; // cracked but still one piece — keep the body, drop the process
+        let component_count =
+            count_components(n, &body.0.bonds, &proc.0.broken, &proc.0.pulverized);
+        if component_count <= 1 {
+            let broken_count = proc.0.broken.iter().filter(|&&broken| broken).count();
+            let pulverized_count = proc
+                .0
+                .pulverized
+                .iter()
+                .filter(|&&pulverized| pulverized)
+                .count();
+            info!(
+                "fracture completed without split: entity={:?} cells={} broken_bonds={} pulverized_cells={}",
+                e, n, broken_count, pulverized_count
+            );
+            commands.entity(e).remove::<FractureProcessComp>();
+            continue;
         }
+        info!(
+            "fracture split detected: entity={:?} cells={} components={}",
+            e, n, component_count
+        );
 
         let pos = xf.translation.truncate();
         let input = FractureInput {
@@ -497,10 +559,17 @@ fn advance_fractures(
             true,
         );
 
+        budget.remove(body.0.cells.len() as i32);
+        info!(
+            "despawning fractured body entity={:?} removed_cells={} fragment_specs={} cell_budget={}",
+            e,
+            body.0.cells.len(),
+            frags.len(),
+            budget.count
+        );
         commands.entity(e).despawn();
         for frag in frags {
-            // spawn_fragment(&mut commands, frag);  // was AsteroidPrefab.Create
-            let _ = frag;
+            prefabs::spawn_fragment(&mut commands, &mut budget, &frag);
         }
     }
 }
