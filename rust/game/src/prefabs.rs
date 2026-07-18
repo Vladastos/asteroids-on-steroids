@@ -5,8 +5,11 @@ use fracture::{FracturableBody, FractureProperties, Rng};
 
 use crate::{
     collision::game_layers,
-    components::{AsteroidTag, BulletTag, Collider, PreviousTransform, RigidBody, Velocity},
+    components::{
+        AsteroidTag, BulletTag, Collider, PlayerTag, PreviousTransform, RigidBody, Velocity,
+    },
     config::{material_to_fracture_properties, GameConfigRes},
+    player::AimComponent,
     FracturableBodyComp, GameplayEntity,
 };
 
@@ -20,6 +23,7 @@ const ASTEROID_SPIN: f32 = 0.08;
 const ASTEROID_POS: Vec2 = Vec2::new(360.0, 120.0);
 
 const BULLET_LAUNCH_POS: Vec2 = Vec2::new(-520.0, 120.0);
+const PLAYER_BULLET_SPAWN_OFFSET: f32 = 48.0;
 const BULLET_SPEED: f32 = 900.0;
 const DEFAULT_BULLET_MASS: f32 = 1000.0;
 const BULLET_DIR: Vec2 = Vec2::X;
@@ -169,12 +173,21 @@ pub(crate) fn spawn_fragment(
     Some(entity)
 }
 
-pub(crate) fn fire_bullet_on_click(mut commands: Commands, mouse: Res<ButtonInput<MouseButton>>) {
+pub(crate) fn fire_bullet_on_click(
+    mut commands: Commands,
+    mouse: Res<ButtonInput<MouseButton>>,
+    player: Query<(&Transform, &AimComponent), With<PlayerTag>>,
+) {
     if !mouse.just_pressed(MouseButton::Left) {
         return;
     }
 
-    spawn_bullet(&mut commands, BULLET_LAUNCH_POS, BULLET_DIR);
+    let Ok((transform, aim)) = player.single() else {
+        return;
+    };
+
+    let pos = transform.translation.truncate() + aim.dir * PLAYER_BULLET_SPAWN_OFFSET;
+    spawn_bullet(&mut commands, pos, aim.dir);
 }
 
 fn spawn_bullet(commands: &mut Commands, pos: Vec2, dir: Vec2) -> Entity {
