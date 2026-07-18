@@ -8,6 +8,27 @@ use crate::components::*;
 #[derive(Resource, Default, Deref, DerefMut)]
 pub(crate) struct Gravity(pub Vec2);
 
+/// Queue a world-space force for the next `physics_system` integration pass.
+/// Wakes the body, matching C# `PhysicsSystem.ApplyForce` — a sleeping body is
+/// skipped by integration, so without this a thrust applied to a settled body
+/// would sit in `accumulated_force` and never actually move it.
+pub(crate) fn apply_force(body: &mut RigidBody, force: Vec2) {
+    body.asleep = false;
+    body.sleep_timer = 0.0;
+    body.accumulated_force += force;
+}
+
+/// Queue an off-centre force impulse (linear force + torque). Port of C#
+/// `PhysicsSystem.ApplyForceAtPoint`. `contact_offset` is the world-space
+/// contact point minus the body's centroid. Not yet called by any real
+/// system (no off-centre gameplay force exists yet); kept for parity with
+/// the C#'s public physics API.
+#[allow(dead_code)]
+pub(crate) fn apply_force_at_point(body: &mut RigidBody, force: Vec2, contact_offset: Vec2) {
+    apply_force(body, force);
+    body.accumulated_torque += contact_offset.x * force.y - contact_offset.y * force.x;
+}
+
 /// Snapshot the current fixed-step pose before movement or physics mutates it.
 pub(crate) fn previous_state_system(mut poses: Query<(&Transform, &mut PreviousTransform)>) {
     for (transform, mut previous) in &mut poses {

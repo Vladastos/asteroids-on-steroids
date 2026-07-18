@@ -243,7 +243,7 @@ fn asteroid_material(config: &GameConfigRes) -> FractureProperties {
     material_to_fracture_properties(material)
 }
 
-fn mass_and_inertia(body: &FracturableBody) -> (f32, f32) {
+pub(crate) fn mass_and_inertia(body: &FracturableBody) -> (f32, f32) {
     let total_weighted_area: f32 = body
         .cells
         .iter()
@@ -268,7 +268,7 @@ fn mass_and_inertia(body: &FracturableBody) -> (f32, f32) {
     (mass, inertia)
 }
 
-fn fracturable_body_collider(body: &FracturableBody) -> Collider {
+pub(crate) fn fracturable_body_collider(body: &FracturableBody) -> Collider {
     let parts: Vec<_> = body
         .cells
         .iter()

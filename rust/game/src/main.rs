@@ -5,6 +5,7 @@
 pub mod collision;
 pub mod components;
 pub mod config;
+pub mod player;
 pub mod prefabs;
 pub mod rendering;
 pub mod systems;
@@ -18,6 +19,7 @@ use fracture::{
     build_result, compute_energy, count_components, drive_to_completion, seed_process,
     FracturableBody as PureBody, FractureInput, FractureProcess as PureProcess, Rng, WeaponProfile,
 };
+use player::*;
 use prefabs::*;
 use rendering::*;
 use systems::*;
@@ -50,6 +52,7 @@ fn main() {
                 load_game_config,
                 log_startup,
                 spawn_camera,
+                spawn_player,
                 spawn_test_asteroid,
                 spawn_verification_bullet,
             )
@@ -70,6 +73,8 @@ fn main() {
             Update,
             (
                 sample_player_input,
+                aim_player,
+                follow_player,
                 (
                     main_menu_input.run_if(in_state(AppState::MainMenu)),
                     playing_input.run_if(in_state(AppState::Playing)),
@@ -84,6 +89,7 @@ fn main() {
             FixedUpdate,
             (
                 previous_state_system,
+                move_player,
                 physics_system,
                 movement_system,
                 collision_system,
@@ -185,7 +191,7 @@ fn cleanup_gameplay_entities(
 /// Diagonal input is normalized so it does not exceed unit length.
 #[allow(dead_code)]
 #[derive(Resource, Debug, Clone, PartialEq)]
-struct PlayerInput {
+pub(crate) struct PlayerInput {
     thrust: Vec2,
     /// Primary-window cursor position in screen pixels. A later gameplay phase
     /// will convert this through the camera once world entities exist.
