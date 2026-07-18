@@ -30,7 +30,9 @@ fn main() {
         .insert_resource(Time::<Fixed>::from_seconds(1.0 / 120.0))
         .insert_resource(FixedTickProbe::default())
         .insert_resource(GameplayEventProbe::default())
+        .init_resource::<Gravity>()
         .init_resource::<DemoMovementProbe>()
+        .init_resource::<DemoForceProbe>()
         .init_resource::<PlayerInput>()
         .init_resource::<PlayerInputLogProbe>()
         .add_event::<ImpactEvent>()
@@ -65,11 +67,13 @@ fn main() {
             FixedUpdate,
             (
                 previous_state_system,
+                physics_system,
                 movement_system,
                 log_demo_movement_probe,
                 seed_fractures,
                 advance_fractures,
                 log_fixed_tick_rate,
+                apply_demo_force_probe,
             )
                 .chain(),
         )
