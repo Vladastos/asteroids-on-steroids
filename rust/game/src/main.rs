@@ -4,6 +4,7 @@
 
 pub mod collision;
 pub mod components;
+pub mod prefabs;
 pub mod rendering;
 pub mod systems;
 
@@ -14,10 +15,10 @@ use bevy::{log::info, prelude::*, window::PrimaryWindow};
 use bevy_vector_shapes::prelude::*;
 use components::*;
 use fracture::{
-    build_asteroid, build_result, compute_energy, count_components, drive_to_completion,
-    seed_process, FracturableBody as PureBody, FractureInput, FractureProcess as PureProcess,
-    FractureProperties, Rng, WeaponProfile,
+    build_result, compute_energy, count_components, drive_to_completion, seed_process,
+    FracturableBody as PureBody, FractureInput, FractureProcess as PureProcess, Rng, WeaponProfile,
 };
+use prefabs::*;
 use rendering::*;
 use systems::*;
 
@@ -43,6 +44,7 @@ fn main() {
         .init_resource::<PlayerInput>()
         .init_resource::<PlayerInputLogProbe>()
         .init_resource::<CollisionGrid>()
+        .init_resource::<CellBudget>()
         .add_event::<ImpactEvent>()
         .add_event::<BulletHitEvent>()
         .add_event::<GrenadeDetonateEvent>()
@@ -75,9 +77,11 @@ fn main() {
                 (
                     main_menu_input.run_if(in_state(AppState::MainMenu)),
                     playing_input.run_if(in_state(AppState::Playing)),
+                    fire_bullet_on_click.run_if(in_state(AppState::Playing)),
                     log_player_input_probe.run_if(in_state(AppState::Playing)),
                 ),
                 draw_demo_movers,
+                draw_bullets,
                 attach_fracturable_body_meshes,
                 (publish_gameplay_event_probe, log_gameplay_event_probe).chain(),
             )
@@ -103,34 +107,6 @@ fn main() {
 
 fn log_startup() {
     info!("Asteroids on Steroids Bevy app started");
-}
-
-fn spawn_test_asteroid(mut commands: Commands) {
-    let material = FractureProperties {
-        toughness: 24.0,
-        restitution: 0.3,
-        relax_rate: 100.0,
-        brittleness: 0.55,
-        crack_speed: 200.0,
-        grain_area: 380.0,
-        min_fragment_area: 100.0,
-        density: 1.0,
-        cell_toughness: 1.0,
-        spin_pre_stress: 0.1,
-        crack_directionality: 0.3,
-        detach_cell_scale: 0.9,
-        detach_cell_jitter: 0.02,
-    };
-    let mut rng = Rng::new(0x5eed);
-    let body = build_asteroid(12, 80.0, material, None, &mut rng);
-    info!("spawned test asteroid with {} cells", body.cells.len());
-
-    commands.spawn((
-        AsteroidTag,
-        FracturableBodyComp(body),
-        Transform::from_translation(Vec3::new(360.0, 120.0, 0.0)),
-        GlobalTransform::default(),
-    ));
 }
 
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

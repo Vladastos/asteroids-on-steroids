@@ -8,12 +8,14 @@ use bevy::{
 };
 use bevy_vector_shapes::prelude::*;
 
-use crate::components::PreviousTransform;
+use crate::components::{BulletTag, PreviousTransform};
+use crate::prefabs::BULLET_RADIUS;
 use crate::systems::DemoMover;
 use crate::FracturableBodyComp;
 
 const DEMO_MOVER_RADIUS: f32 = 15.0;
 const DEMO_MOVER_COLOR: Color = Color::srgb(1.0, 0.55, 0.05);
+const BULLET_COLOR: Color = Color::srgb(1.0, 0.92, 0.35);
 const ASTEROID_BASE_COLOR: Vec3 = Vec3::new(0.42, 0.43, 0.43);
 
 pub(crate) fn spawn_camera(mut commands: Commands) {
@@ -40,6 +42,26 @@ pub(crate) fn draw_demo_movers(
         painter.set_translation(render_position.extend(transform.translation.z));
         painter.set_rotation(Quat::from_rotation_z(render_rotation));
         painter.circle(DEMO_MOVER_RADIUS);
+    }
+}
+
+pub(crate) fn draw_bullets(
+    mut painter: ShapePainter,
+    fixed_time: Res<Time<Fixed>>,
+    bullets: Query<(&Transform, &PreviousTransform), With<BulletTag>>,
+) {
+    let alpha = fixed_time.overstep_fraction();
+
+    painter.hollow = false;
+    painter.set_color(BULLET_COLOR);
+
+    for (transform, previous_transform) in &bullets {
+        let current_position = transform.translation.truncate();
+        let render_position = previous_transform.position.lerp(current_position, alpha);
+
+        painter.set_translation(render_position.extend(transform.translation.z));
+        painter.set_rotation(Quat::IDENTITY);
+        painter.circle(BULLET_RADIUS);
     }
 }
 
@@ -75,7 +97,9 @@ fn build_body_mesh(body: &fracture::FracturableBody) -> Mesh {
 
         let start_vertex =
             u32::try_from(positions.len()).expect("fracturable body mesh exceeds u32 vertices");
-        let color = cell_mesh_color(cell_index, cell.area).to_linear().to_f32_array();
+        let color = cell_mesh_color(cell_index, cell.area)
+            .to_linear()
+            .to_f32_array();
 
         for vertex in &cell.local {
             positions.push([vertex.x, vertex.y, 0.0]);
